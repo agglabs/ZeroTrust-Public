@@ -1,0 +1,20 @@
+# zt-service-probes.txt
+# format: match<TAB>service<TAB>regex<TAB>flags(optional)
+
+match	ssh	^SSH-[\d.]+-(\w+)_([\w.]+)
+match	ftp	^220 \((vsFTPd) ([\d.]+)\)
+match	ftp	^220 (ProFTPD)(?: ([\d.]+))? Server
+match	ftp	Welcome to (Pure-FTPd)
+match	ftp	\bftp\b	icase
+match	smtp	ESMTP (Postfix)
+match	smtp	ESMTP (Exim) ([\d.]+)
+match	smtp	\bESMTP\b
+match	pop3	^\+OK (Dovecot) ready
+match	imap	^\* OK.*\b(Dovecot)\b
+
+match	http	Server:\s*([^\r\n/]+)/([\d.]+)
+match	http	Server:\s*([^\r\n]+)
+match	http	^HTTP/\d\.\d \d{3}
+
+# DNS - port 53 UDP zwykle, ale skanujemy TCP, tu tylko pomocniczo
+match	dns	^\d+ Version:

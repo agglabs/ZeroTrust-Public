@@ -1,0 +1,14 @@
+# http-trace-enabled.ztl
+# Sprawdza czy serwer HTTP odpowiada na metode TRACE (potencjalny XST).
+
+plugin http-trace-enabled {
+    service     "http"
+    severity    LOW
+    title       "HTTP TRACE method enabled"
+    description "The server responds to TRACE requests. This is generally unnecessary and, combined with other bugs, can enable cross-site tracing attacks."
+
+    probe {
+        send   "TRACE / HTTP/1.0\r\n\r\n"
+        expect "^HTTP/1\\.[01] 200"
+    }
+}

@@ -1,0 +1,19 @@
+# nginx-old-version.ztl
+# Pokazuje pre-require (preselekcja) i post-require (postwarunek na captured var).
+# Trafia tylko na nginx starszy niz 1.20.
+
+plugin nginx-old-version {
+    service     "http"
+    severity    MEDIUM
+    title       "Outdated nginx version ${nginx_version}"
+    description "nginx ${nginx_version} is older than the recommended stable branch. Consider upgrading to a supported version."
+
+    require product == "nginx"
+
+    probe {
+        send   "GET / HTTP/1.0\r\nHost: zerotrust\r\nConnection: close\r\n\r\n"
+        expect "^HTTP/1\\.[01] "
+        capture "Server:\\s*nginx/([0-9.]+)" as nginx_version
+        require nginx_version < "1.20.0"
+    }
+}

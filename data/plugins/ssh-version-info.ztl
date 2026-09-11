@@ -1,0 +1,17 @@
+# ssh-version-info.ztl
+# Pokazuje capture groups + variable substitution.
+# Uzywa welcome bannera SSH (drenowanego jako last_response),
+# wyciaga produkt i wersje, wstawia do title/description.
+
+plugin ssh-version-info {
+    service     "ssh"
+    severity    INFO
+    title       "SSH server identified: ${product} ${version}"
+    description "The SSH banner reveals product ${product} version ${version}. Consider suppressing version disclosure if the deployment policy requires it."
+
+    probe {
+        expect  "^SSH-"
+        capture "SSH-[0-9.]+-([A-Za-z0-9_-]+)_" as product
+        capture "SSH-[0-9.]+-[A-Za-z0-9_-]+_([0-9.p]+)" as version
+    }
+}

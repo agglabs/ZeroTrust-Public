@@ -1,0 +1,8 @@
+build/
+*.o
+scan.json
+*.log
+.vscode/
+tests
+compile_commands.json
+scan.json

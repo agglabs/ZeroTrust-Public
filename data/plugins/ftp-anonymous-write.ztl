@@ -1,0 +1,32 @@
+# ftp-anonymous-write.ztl
+# Pokazuje 'when' - drugi probe uruchamia sie tylko jesli
+# poprzedni krok potwierdzil anonimowe zalogowanie (odpowiedz 230).
+
+plugin ftp-anonymous-write {
+    service     "ftp"
+    severity    CRITICAL
+    title       "Anonymous FTP allows write access"
+    description "The FTP server accepted an anonymous login and did not immediately deny an upload attempt. Verify manually before treating as confirmed write access."
+
+    probe {
+        send   "USER anonymous\r\n"
+        expect "^331"
+    }
+
+    probe {
+        send   "PASS zerotrust@example.com\r\n"
+        expect "^230"
+    }
+
+    probe {
+        when   "^230"
+        send   "TYPE I\r\n"
+        expect "^200"
+    }
+
+    probe {
+        when   "^200"
+        send   "STOR zerotrust-probe.txt\r\n"
+        expect "^(150|125)"
+    }
+}
