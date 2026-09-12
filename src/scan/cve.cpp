@@ -1,8 +1,8 @@
 // vuln.cpp
 
-#include "vuln/vuln.hpp"
-#include "vuln/terrapin.hpp"
-#include "vuln/tls_checks.hpp"
+#include "scan/cve.hpp"
+#include "protocols/ssh/terrapin.hpp"
+#include "protocols/tls/checks.hpp"
 #include "logging/logging.hpp"
 
 #include <algorithm>

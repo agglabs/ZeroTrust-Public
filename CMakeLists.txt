@@ -24,30 +24,24 @@ add_executable(zerotrustd
 
     src/protocols/dns/resolver.cpp
 
-    src/concurrency/thread_pool.cpp
+    src/processor/thread_pool.cpp
 
-    src/ztl/interpreter.cpp
+    src/ztl/lexer.cpp
     src/ztl/parser.cpp
+    src/ztl/interpreter.cpp
+    src/ztl/runner.cpp
 
-    src/vuln/vuln.cpp
-    src/vuln/terrapin.cpp
-    src/vuln/tls_checks.cpp
+    src/scan/cve.cpp
+    src/protocols/ssh/terrapin.cpp
+    src/protocols/tls/checks.cpp
 
     src/transport/tls.cpp
 
     src/core/knowledge_base.cpp
 
-    src/util/cidr.cpp
-    src/util/json.cpp
+    src/scan/cidr.cpp
 
-    src/import/nmap_probes.cpp
-    src/import/nvd.cpp
-
-    src/report/json_writer.cpp
-    src/report/reader.cpp
-    src/report/delta.cpp
-
-    src/progress/reporter.cpp
+    src/scan/reporter.cpp
 )
 
 find_package(Threads REQUIRED)

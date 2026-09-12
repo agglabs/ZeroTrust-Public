@@ -2,50 +2,117 @@
 
 #pragma once
 
-#include "severity.h"
-#include "protocol.h"
-
+#include <memory>
 #include <string>
+#include <variant>
 #include <vector>
 
 namespace ztl {
-    struct Capture {
-        std::string pattern;
-        std::string name;
+    struct Expr;
+    struct Stmt;
+    using ExprPtr = std::shared_ptr<Expr>;
+    using StmtPtr = std::shared_ptr<Stmt>;
+
+    // ---------- Expressions ----------
+
+    struct LiteralNull {};
+    struct LiteralBool   { bool value; };
+    struct LiteralNumber { double value; };
+    struct LiteralString { std::string value; };
+    struct Identifier    { std::string name; };
+
+    struct MemberAccess {
+        ExprPtr object;
+        std::string member;
     };
 
-    struct Require {
-        std::string field;
-        std::string op;
-        std::string value;
+    struct ScopedAccess {
+        std::string scope;   // e.g. "net"
+        std::string name;    // e.g. "http"
     };
 
-    struct Probe {
-        std::string send;
-        std::vector<std::string> expect;
-        std::vector<std::string> expect_not;
-        std::string when;
-
-        std::vector<Capture> captures;
-        std::vector<Require> post_requires;
+    struct CallArg {
+        std::string name;    // empty if positional
+        ExprPtr value;
     };
 
-    enum class MatchMode {
-        ALL,
-        ANY
+    struct Call {
+        ExprPtr callee;
+        std::vector<CallArg> args;
+        std::vector<StmtPtr> trailing_block;  // for plugin.run { ... }
+        bool has_block = false;
     };
 
-    struct Plugin {
-        std::string name;
-        std::string service;
-        std::string title;
-        std::string description;
+    struct UnaryOp {
+        std::string op;    // "!" or "-"
+        ExprPtr operand;
+    };
 
-        core::Severity severity = core::Severity::INFO;
-        core::Protocol protocol = core::Protocol::TCP;
-        MatchMode match_mode = MatchMode::ALL;
+    struct BinaryOp {
+        std::string op;    // "==", "!=", "<", ">", "<=", ">=", "&&", "||", "+", "-"
+        ExprPtr lhs;
+        ExprPtr rhs;
+    };
 
-        std::vector<Require> pre_requires;
-        std::vector<Probe> probes;
+    struct Expr {
+        std::variant<
+            LiteralNull,
+            LiteralBool,
+            LiteralNumber,
+            LiteralString,
+            Identifier,
+            MemberAccess,
+            ScopedAccess,
+            Call,
+            UnaryOp,
+            BinaryOp
+        > node;
+
+        int line = 0;
+        int col = 0;
+    };
+
+    // ---------- Statements ----------
+
+    struct ExprStmt {
+        ExprPtr expr;
+    };
+
+    struct AssignStmt {
+        std::string target_name;   // simple assignment to identifier
+        ExprPtr value;
+    };
+
+    struct IfStmt {
+        ExprPtr condition;
+        std::vector<StmtPtr> then_branch;
+        std::vector<StmtPtr> else_branch;
+    };
+
+    struct ReturnStmt {
+        ExprPtr value;   // may be nullptr
+    };
+
+    struct IncludeStmt {
+        std::string module_name;
+    };
+
+    struct Stmt {
+        std::variant<
+            ExprStmt,
+            AssignStmt,
+            IfStmt,
+            ReturnStmt,
+            IncludeStmt
+        > node;
+
+        int line = 0;
+        int col = 0;
+    };
+
+    // ---------- Program ----------
+
+    struct Program {
+        std::vector<StmtPtr> statements;
     };
 }

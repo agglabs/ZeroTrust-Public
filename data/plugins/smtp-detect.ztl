@@ -1,0 +1,51 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("SMTP service detection");
+plugin.description("Detects an SMTP server on any port by reading the 220 banner and looking for SMTP/ESMTP markers.");
+plugin.category("service-detect");
+plugin.filter(any: true);
+
+plugin.run
+{
+    tcp = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2000
+    );
+
+    if (!tcp.connected())
+    {
+        return;
+    }
+
+    banner = tcp.recv_banner(timeout_ms: 2000);
+
+    if (banner == "")
+    {
+        return;
+    }
+
+    if (!banner.starts_with("220"))
+    {
+        return;
+    }
+
+    lower = banner.to_lower();
+    if (!lower.contains("smtp") && !lower.contains("esmtp") && !lower.contains("mail"))
+    {
+        return;
+    }
+
+    trimmed = banner.trim();
+    plugin.set_service("smtp", banner: trimmed);
+    kb.set("smtp.banner", trimmed);
+
+    finding(
+        severity: "info",
+        title: "SMTP server detected",
+        description: "Service responded with an SMTP-style 220 banner.",
+        evidence: trimmed,
+        confidence: 0.95
+    );
+}

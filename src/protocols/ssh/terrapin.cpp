@@ -1,6 +1,6 @@
 // terrapin.cpp
 
-#include "vuln/terrapin.hpp"
+#include "protocols/ssh/terrapin.hpp"
 #include "transport/tcp.hpp"
 
 #include <algorithm>

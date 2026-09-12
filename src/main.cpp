@@ -3,19 +3,13 @@
 #include "transport/icmp.hpp"
 #include "processor/processor.hpp"
 #include "protocols/dns/resolver.hpp"
-#include "concurrency/thread_pool.hpp"
-#include "ztl/interpreter.hpp"
-#include "ztl/parser.hpp"
-#include "vuln/vuln.hpp"
+#include "processor/thread_pool.hpp"
+#include "ztl/runner.hpp"
+#include "scan/cve.hpp"
 #include "core/knowledge_base.hpp"
-#include "progress/reporter.hpp"
-#include "import/nmap_probes.hpp"
-#include "import/nvd.hpp"
-#include "util/cidr.hpp"
-#include "util/os_fingerprint.hpp"
-#include "report/json_writer.hpp"
-#include "report/reader.hpp"
-#include "report/delta.hpp"
+#include "scan/reporter.hpp"
+#include "scan/cidr.hpp"
+#include "protocols/tcp/os_fingerprint.hpp"
 #include "port.h"
 #include "host.h"
 #include "finding.h"
@@ -25,6 +19,7 @@
 #include <vector>
 #include <mutex>
 #include <algorithm>
+#include <cctype>
 #include <arpa/inet.h>
 
 using namespace std;
@@ -37,7 +32,7 @@ int main()
     vuln::load_database("data/zt-cve-database.txt");
     vuln::load_database("data/zt-cve-database-nvd.txt");
 
-    const std::vector<ztl::Plugin> plugins = ztl::load_plugins_from_dir("data/plugins");
+    const std::vector<ztl::LoadedPlugin> plugins = ztl::load_plugins_dir("data/plugins");
 
     int protocol;
 
@@ -46,71 +41,9 @@ int main()
     cout << "2. UDP\n";
     cout << "3. ICMP (ping)\n";
     cout << "4. TCP port range scan\n";
-    cout << "5. Full scan (CIDR + OS fingerprint + JSON report)\n";
-    cout << "6. Compare two scan reports (delta)\n";
-    cout << "7. Import external databases (nmap probes / NVD JSON)\n";
+    cout << "5. Full scan (CIDR + OS fingerprint)\n";
     cout << "Protocol: ";
     cin >> protocol;
-
-    if (protocol == 7)
-    {
-        int subchoice = 0;
-        cout << "  1. Import nmap-service-probes\n";
-        cout << "  2. Import NVD JSON feed\n";
-        cout << "  Choice: ";
-        cin >> subchoice;
-
-        cin.ignore(1024, '\n');
-
-        if (subchoice == 1)
-        {
-            std::string src;
-            cout << "  Source path (default /opt/homebrew/share/nmap/nmap-service-probes): ";
-            std::getline(cin, src);
-            if (src.empty()) src = "/opt/homebrew/share/nmap/nmap-service-probes";
-
-            import_data::import_nmap_probes(src, "data/zt-service-probes-nmap.txt");
-        }
-        else if (subchoice == 2)
-        {
-            std::string src;
-            cout << "  NVD JSON file path: ";
-            std::getline(cin, src);
-            if (src.empty()) {
-                cerr << "  No path provided\n";
-                return 1;
-            }
-
-            import_data::import_nvd(src, "data/zt-cve-database-nvd.txt");
-        }
-        else
-        {
-            cerr << "Invalid choice\n";
-            return 1;
-        }
-
-        return 0;
-    }
-
-    if (protocol == 6)
-    {
-        std::string before_path;
-        std::string after_path;
-
-        cout << "Path to BEFORE scan.json: ";
-        cin >> before_path;
-
-        cout << "Path to AFTER  scan.json: ";
-        cin >> after_path;
-
-        auto before = report::read_scan_report(before_path);
-        auto after  = report::read_scan_report(after_path);
-
-        if (!before || !after) return 1;
-
-        report::print_delta(*before, *after);
-        return 0;
-    }
 
     string ip;
     int port = 0;
@@ -277,10 +210,29 @@ int main()
                         std::vector<core::Finding> native_findings = vuln::run_native_checks(result, ip, kb);
                         for (core::Finding& f : native_findings) local_findings.push_back(std::move(f));
 
-                        for (const ztl::Plugin& plugin : plugins)
                         {
-                            auto f = ztl::execute(plugin, result, ip, kb);
-                            if (f) local_findings.push_back(*f);
+                            std::string detected_svc;
+                            auto plugin_findings = ztl::run_for_port(plugins, ip, result.number, result.service, detected_svc);
+                            if (result.service.empty() && !detected_svc.empty()) result.service = detected_svc;
+                            for (const auto& f : plugin_findings) {
+                                core::Finding cf;
+                                cf.plugin_name = f.plugin_name;
+                                cf.title = f.title;
+                                cf.description = f.description + (f.evidence.empty() ? "" : " | evidence: " + f.evidence);
+                                cf.port_number = f.port_number;
+                                cf.service = f.service;
+                                std::string sev = f.severity;
+                                for (auto& c : sev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                                if      (sev == "CRITICAL") cf.severity = core::Severity::CRITICAL;
+                                else if (sev == "HIGH")     cf.severity = core::Severity::HIGH;
+                                else if (sev == "MEDIUM")   cf.severity = core::Severity::MEDIUM;
+                                else if (sev == "LOW")      cf.severity = core::Severity::LOW;
+                                else                        cf.severity = core::Severity::INFO;
+                                if      (f.confidence >= 0.9) cf.confidence = core::Confidence::VERIFIED;
+                                else if (f.confidence >= 0.5) cf.confidence = core::Confidence::VERSION_MATCH;
+                                else                          cf.confidence = core::Confidence::UNKNOWN;
+                                local_findings.push_back(std::move(cf));
+                            }
                         }
 
                         std::vector<core::Finding> cve_findings = vuln::check_port(result);
@@ -463,10 +415,29 @@ int main()
                         std::vector<core::Finding> native_findings = vuln::run_native_checks(result, target_ip, kb);
                         for (core::Finding& f : native_findings) local_findings.push_back(std::move(f));
 
-                        for (const ztl::Plugin& plugin : plugins)
                         {
-                            auto f = ztl::execute(plugin, result, target_ip, kb);
-                            if (f) local_findings.push_back(*f);
+                            std::string detected_svc;
+                            auto plugin_findings = ztl::run_for_port(plugins, target_ip, result.number, result.service, detected_svc);
+                            if (result.service.empty() && !detected_svc.empty()) result.service = detected_svc;
+                            for (const auto& f : plugin_findings) {
+                                core::Finding cf;
+                                cf.plugin_name = f.plugin_name;
+                                cf.title = f.title;
+                                cf.description = f.description + (f.evidence.empty() ? "" : " | evidence: " + f.evidence);
+                                cf.port_number = f.port_number;
+                                cf.service = f.service;
+                                std::string sev = f.severity;
+                                for (auto& c : sev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                                if      (sev == "CRITICAL") cf.severity = core::Severity::CRITICAL;
+                                else if (sev == "HIGH")     cf.severity = core::Severity::HIGH;
+                                else if (sev == "MEDIUM")   cf.severity = core::Severity::MEDIUM;
+                                else if (sev == "LOW")      cf.severity = core::Severity::LOW;
+                                else                        cf.severity = core::Severity::INFO;
+                                if      (f.confidence >= 0.9) cf.confidence = core::Confidence::VERIFIED;
+                                else if (f.confidence >= 0.5) cf.confidence = core::Confidence::VERSION_MATCH;
+                                else                          cf.confidence = core::Confidence::UNKNOWN;
+                                local_findings.push_back(std::move(cf));
+                            }
                         }
 
                         std::vector<core::Finding> cve_findings = vuln::check_port(result);
@@ -497,9 +468,7 @@ int main()
 
         reporter.end();
 
-        report::write_json_report("scan.json", ip, hosts);
-
-        cout << "\nDone. JSON report: scan.json\n";
+        cout << "\nDone.\n";
     }
     else
     {

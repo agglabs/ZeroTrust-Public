@@ -16,5 +16,4 @@ match	http	Server:\s*([^\r\n/]+)/([\d.]+)
 match	http	Server:\s*([^\r\n]+)
 match	http	^HTTP/\d\.\d \d{3}
 
-# DNS - port 53 UDP zwykle, ale skanujemy TCP, tu tylko pomocniczo
 match	dns	^\d+ Version:

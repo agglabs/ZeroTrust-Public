@@ -1,6 +1,6 @@
 // cidr.cpp
 
-#include "util/cidr.hpp"
+#include "scan/cidr.hpp"
 #include "logging/logging.hpp"
 
 #include <arpa/inet.h>

@@ -1,6 +1,6 @@
 // tls_checks.cpp
 
-#include "vuln/tls_checks.hpp"
+#include "protocols/tls/checks.hpp"
 #include "transport/tls.hpp"
 
 #include <string>

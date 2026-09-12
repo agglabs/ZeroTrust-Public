@@ -1,408 +1,311 @@
 // parser.cpp
 
 #include "ztl/parser.hpp"
-#include "logging/logging.hpp"
-
-#include <cctype>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
 
 namespace {
-    struct Cursor {
-        const std::string& text;
-        std::size_t pos = 0;
-        int line = 1;
-
-        Cursor(const std::string& t) : text(t) {}
-
-        bool eof() const {
-            return pos >= text.size();
-        }
-
-        char peek() const {
-            return eof() ? '\0' : text[pos];
-        }
-
-        char advance() {
-            char c = text[pos++];
-            if (c == '\n') line++;
-            return c;
-        }
-
-        void skip_whitespace_and_comments() {
-            while (!eof()) {
-                char c = peek();
-
-                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-                    advance();
-                    continue;
-                }
-
-                if (c == '#') {
-                    while (!eof() && peek() != '\n') advance();
-                    continue;
-                }
-
-                break;
-            }
-        }
-
-        std::string read_identifier() {
-            std::string out;
-
-            while (!eof()) {
-                char c = peek();
-                if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-') {
-                    out += c;
-                    advance();
-                } else {
-                    break;
-                }
-            }
-
-            return out;
-        }
-
-        std::string read_operator() {
-            std::string out;
-
-            while (!eof()) {
-                char c = peek();
-                if (c == '=' || c == '!' || c == '<' || c == '>') {
-                    out += c;
-                    advance();
-                } else {
-                    break;
-                }
-            }
-
-            return out;
-        }
-
-        std::optional<std::string> read_string() {
-            if (peek() != '"') return std::nullopt;
-            advance();
-
-            std::string out;
-
-            while (!eof() && peek() != '"') {
-                char c = advance();
-
-                if (c == '\\' && !eof()) {
-                    char next = advance();
-
-                    if (next == 'x' && pos + 1 < text.size()) {
-                        auto hex_value = [](char h) -> int {
-                            if (h >= '0' && h <= '9') return h - '0';
-                            if (h >= 'a' && h <= 'f') return 10 + (h - 'a');
-                            if (h >= 'A' && h <= 'F') return 10 + (h - 'A');
-                            return -1;
-                        };
-
-                        int hi = hex_value(text[pos]);
-                        int lo = hex_value(text[pos + 1]);
-
-                        if (hi >= 0 && lo >= 0) {
-                            advance();
-                            advance();
-                            out += static_cast<char>((hi << 4) | lo);
-                            continue;
-                        }
-                    }
-
-                    switch (next) {
-                        case 'n':  out += '\n'; break;
-                        case 'r':  out += '\r'; break;
-                        case 't':  out += '\t'; break;
-                        case '"':  out += '"';  break;
-                        case '\\': out += '\\'; break;
-                        case '0':  out += '\0'; break;
-                        default:   out += next; break;
-                    }
-                } else {
-                    out += c;
-                }
-            }
-
-            if (eof()) return std::nullopt;
-            advance();
-
-            return out;
-        }
-    };
-
-    std::optional<core::Severity> parse_severity(const std::string& s) {
-        if (s == "INFO")     return core::Severity::INFO;
-        if (s == "LOW")      return core::Severity::LOW;
-        if (s == "MEDIUM")   return core::Severity::MEDIUM;
-        if (s == "HIGH")     return core::Severity::HIGH;
-        if (s == "CRITICAL") return core::Severity::CRITICAL;
-        return std::nullopt;
+    template <typename T>
+    ztl::ExprPtr make_expr(T node, int line, int col) {
+        auto e = std::make_shared<ztl::Expr>();
+        e->node = std::move(node);
+        e->line = line;
+        e->col = col;
+        return e;
     }
 
-    std::optional<ztl::Require> parse_require(Cursor& c, const std::string& source_name) {
-        c.skip_whitespace_and_comments();
-
-        std::string field = c.read_identifier();
-        if (field.empty()) {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected field name after 'require'");
-            return std::nullopt;
-        }
-
-        c.skip_whitespace_and_comments();
-
-        std::string op;
-        char first = c.peek();
-
-        if (first == '=' || first == '!' || first == '<' || first == '>') {
-            op = c.read_operator();
-        } else {
-            op = c.read_identifier();
-        }
-
-        if (op.empty()) {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected operator after '" + field + "'");
-            return std::nullopt;
-        }
-
-        c.skip_whitespace_and_comments();
-
-        auto value = c.read_string();
-        if (!value) {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected quoted value after '" + op + "'");
-            return std::nullopt;
-        }
-
-        return ztl::Require{ field, op, *value };
-    }
-
-    std::optional<ztl::Probe> parse_probe(Cursor& c, const std::string& source_name) {
-        c.skip_whitespace_and_comments();
-
-        if (c.peek() != '{') {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected '{' after 'probe'");
-            return std::nullopt;
-        }
-        c.advance();
-
-        ztl::Probe probe;
-
-        while (true) {
-            c.skip_whitespace_and_comments();
-            if (c.eof()) {
-                logging::error(source_name + ": unexpected end of file inside probe block");
-                return std::nullopt;
-            }
-            if (c.peek() == '}') {
-                c.advance();
-                return probe;
-            }
-
-            std::string key = c.read_identifier();
-            c.skip_whitespace_and_comments();
-
-            if (key == "capture") {
-                auto pattern = c.read_string();
-                if (!pattern) {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " expected quoted regex after 'capture'");
-                    return std::nullopt;
-                }
-
-                c.skip_whitespace_and_comments();
-                std::string as_kw = c.read_identifier();
-
-                if (as_kw != "as") {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " expected 'as' after capture pattern");
-                    return std::nullopt;
-                }
-
-                c.skip_whitespace_and_comments();
-                std::string varname = c.read_identifier();
-
-                if (varname.empty()) {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " expected variable name after 'as'");
-                    return std::nullopt;
-                }
-
-                probe.captures.push_back({ *pattern, varname });
-                continue;
-            }
-
-            if (key == "require") {
-                auto req = parse_require(c, source_name);
-                if (!req) return std::nullopt;
-                probe.post_requires.push_back(*req);
-                continue;
-            }
-
-            auto value = c.read_string();
-            if (!value) {
-                logging::error(source_name + ":" + std::to_string(c.line) + " expected quoted string after '" + key + "'");
-                return std::nullopt;
-            }
-
-            if (key == "send")             probe.send = *value;
-            else if (key == "expect")      probe.expect.push_back(*value);
-            else if (key == "expect_not")  probe.expect_not.push_back(*value);
-            else if (key == "when")        probe.when = *value;
-            else {
-                logging::warn(source_name + ":" + std::to_string(c.line) + " unknown probe key '" + key + "'");
-            }
-        }
+    template <typename T>
+    ztl::StmtPtr make_stmt(T node, int line, int col) {
+        auto s = std::make_shared<ztl::Stmt>();
+        s->node = std::move(node);
+        s->line = line;
+        s->col = col;
+        return s;
     }
 }
 
 namespace ztl {
-    std::optional<Plugin> parse_plugin(const std::string& source, const std::string& source_name) {
-        Cursor c(source);
+    Parser::Parser(std::vector<Token> tokens) : tokens_(std::move(tokens)) {}
 
-        c.skip_whitespace_and_comments();
-        std::string kw = c.read_identifier();
-
-        if (kw != "plugin") {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected 'plugin' keyword, got '" + kw + "'");
-            return std::nullopt;
-        }
-
-        c.skip_whitespace_and_comments();
-        std::string name = c.read_identifier();
-
-        if (name.empty()) {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected plugin name");
-            return std::nullopt;
-        }
-
-        c.skip_whitespace_and_comments();
-        if (c.peek() != '{') {
-            logging::error(source_name + ":" + std::to_string(c.line) + " expected '{' after plugin name");
-            return std::nullopt;
-        }
-        c.advance();
-
-        Plugin plugin;
-        plugin.name = name;
-
-        while (true) {
-            c.skip_whitespace_and_comments();
-            if (c.eof()) {
-                logging::error(source_name + ": unexpected end of file inside plugin block");
-                return std::nullopt;
-            }
-            if (c.peek() == '}') {
-                c.advance();
-                break;
-            }
-
-            std::string key = c.read_identifier();
-
-            if (key == "probe") {
-                auto probe = parse_probe(c, source_name);
-                if (!probe) return std::nullopt;
-                plugin.probes.push_back(*probe);
-                continue;
-            }
-
-            if (key == "require") {
-                auto req = parse_require(c, source_name);
-                if (!req) return std::nullopt;
-                plugin.pre_requires.push_back(*req);
-                continue;
-            }
-
-            c.skip_whitespace_and_comments();
-
-            if (key == "severity") {
-                std::string sev_str = c.read_identifier();
-                auto sev = parse_severity(sev_str);
-
-                if (!sev) {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " invalid severity '" + sev_str + "'");
-                    return std::nullopt;
-                }
-
-                plugin.severity = *sev;
-                continue;
-            }
-
-            if (key == "protocol") {
-                std::string proto_str = c.read_identifier();
-
-                if (proto_str == "tcp") {
-                    plugin.protocol = core::Protocol::TCP;
-                } else if (proto_str == "udp") {
-                    plugin.protocol = core::Protocol::UDP;
-                } else {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " invalid protocol '" + proto_str + "' (expected tcp or udp)");
-                    return std::nullopt;
-                }
-
-                continue;
-            }
-
-            if (key == "match_mode") {
-                std::string mode_str = c.read_identifier();
-
-                if (mode_str == "all") {
-                    plugin.match_mode = ztl::MatchMode::ALL;
-                } else if (mode_str == "any") {
-                    plugin.match_mode = ztl::MatchMode::ANY;
-                } else {
-                    logging::error(source_name + ":" + std::to_string(c.line) + " invalid match_mode '" + mode_str + "' (expected all or any)");
-                    return std::nullopt;
-                }
-
-                continue;
-            }
-
-            auto value = c.read_string();
-
-            if (!value) {
-                logging::error(source_name + ":" + std::to_string(c.line) + " expected quoted string or identifier after '" + key + "'");
-                return std::nullopt;
-            }
-
-            if (key == "service")          plugin.service     = *value;
-            else if (key == "title")       plugin.title       = *value;
-            else if (key == "description") plugin.description = *value;
-            else {
-                logging::warn(source_name + ":" + std::to_string(c.line) + " unknown plugin key '" + key + "'");
-            }
-        }
-
-        return plugin;
+    const Token& Parser::peek(int offset) const {
+        std::size_t i = pos_ + static_cast<std::size_t>(offset);
+        if (i >= tokens_.size()) return tokens_.back();
+        return tokens_[i];
     }
 
-    std::vector<Plugin> load_plugins_from_dir(const std::string& dir_path) {
-        std::vector<Plugin> out;
+    const Token& Parser::advance() {
+        const Token& t = tokens_[pos_];
+        if (pos_ + 1 < tokens_.size()) pos_++;
+        return t;
+    }
 
-        std::error_code ec;
-        if (!std::filesystem::exists(dir_path, ec) || !std::filesystem::is_directory(dir_path, ec)) {
-            logging::error("Plugin directory not found: " + dir_path);
-            return out;
+    bool Parser::check(TokenType t) const { return peek().type == t; }
+
+    bool Parser::match(TokenType t) {
+        if (check(t)) { advance(); return true; }
+        return false;
+    }
+
+    const Token& Parser::expect(TokenType t, const std::string& what) {
+        if (!check(t)) {
+            const Token& tk = peek();
+            throw ParseError("expected " + what + ", got '" + tk.text + "'", tk.line, tk.col);
+        }
+        return advance();
+    }
+
+    Program Parser::parse_program() {
+        Program p;
+        while (!check(TokenType::END_OF_FILE)) {
+            p.statements.push_back(parse_statement());
+        }
+        return p;
+    }
+
+    StmtPtr Parser::parse_statement() {
+        if (check(TokenType::INCLUDE_KW)) return parse_include();
+        if (check(TokenType::IF_KW))      return parse_if();
+        if (check(TokenType::RETURN_KW))  return parse_return();
+
+        // Assignment: IDENT '=' expr ';'
+        if (check(TokenType::IDENT) && peek(1).type == TokenType::ASSIGN) {
+            const Token& id = advance();
+            advance();  // '='
+            ExprPtr value = parse_expression();
+            match(TokenType::SEMICOLON);
+            AssignStmt a;
+            a.target_name = id.text;
+            a.value = value;
+            return make_stmt(std::move(a), id.line, id.col);
         }
 
-        for (const auto& entry : std::filesystem::directory_iterator(dir_path, ec)) {
-            if (!entry.is_regular_file()) continue;
-            if (entry.path().extension() != ".ztl") continue;
+        // Otherwise: expression statement
+        int line = peek().line, col = peek().col;
+        ExprPtr e = parse_expression();
+        match(TokenType::SEMICOLON);
+        ExprStmt es;
+        es.expr = e;
+        return make_stmt(std::move(es), line, col);
+    }
 
-            std::ifstream file(entry.path());
-            if (!file.is_open()) {
-                logging::error("Cannot open plugin file: " + entry.path().string());
-                continue;
-            }
+    StmtPtr Parser::parse_include() {
+        const Token& kw = advance();  // 'include'
+        expect(TokenType::LPAREN, "'(' after include");
+        const Token& s = expect(TokenType::STRING, "module name string");
+        expect(TokenType::RPAREN, "')' after include argument");
+        match(TokenType::SEMICOLON);
+        IncludeStmt inc;
+        inc.module_name = s.text;
+        return make_stmt(std::move(inc), kw.line, kw.col);
+    }
 
-            std::ostringstream buffer;
-            buffer << file.rdbuf();
+    StmtPtr Parser::parse_if() {
+        const Token& kw = advance();  // 'if'
+        expect(TokenType::LPAREN, "'(' after if");
+        ExprPtr cond = parse_expression();
+        expect(TokenType::RPAREN, "')' after if condition");
 
-            auto plugin = parse_plugin(buffer.str(), entry.path().filename().string());
+        IfStmt ifs;
+        ifs.condition = cond;
+        ifs.then_branch = parse_block();
 
-            if (plugin) {
-                out.push_back(*plugin);
+        if (match(TokenType::ELSE_KW)) {
+            if (check(TokenType::IF_KW)) {
+                ifs.else_branch.push_back(parse_if());
+            } else {
+                ifs.else_branch = parse_block();
             }
         }
+        return make_stmt(std::move(ifs), kw.line, kw.col);
+    }
 
-        logging::info("Loaded " + std::to_string(out.size()) + " ZTL plugins from " + dir_path);
-        return out;
+    StmtPtr Parser::parse_return() {
+        const Token& kw = advance();  // 'return'
+        ReturnStmt r;
+        if (!check(TokenType::SEMICOLON) && !check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+            r.value = parse_expression();
+        }
+        match(TokenType::SEMICOLON);
+        return make_stmt(std::move(r), kw.line, kw.col);
+    }
+
+    std::vector<StmtPtr> Parser::parse_block() {
+        expect(TokenType::LBRACE, "'{'");
+        std::vector<StmtPtr> stmts;
+        while (!check(TokenType::RBRACE) && !check(TokenType::END_OF_FILE)) {
+            stmts.push_back(parse_statement());
+        }
+        expect(TokenType::RBRACE, "'}'");
+        return stmts;
+    }
+
+    // Expressions (precedence low → high):
+    //   or       ->  and ('||' and)*
+    //   and      ->  equality ('&&' equality)*
+    //   equality ->  comparison (('=='|'!=') comparison)*
+    //   compare  ->  additive (('<'|'>'|'<='|'>=') additive)*
+    //   additive ->  unary (('+'|'-') unary)*
+    //   unary    ->  ('!'|'-') unary | postfix
+    //   postfix  ->  primary ( '.' IDENT | '(' args ')' | trailing-block )*
+    //   primary  ->  NUMBER | STRING | true | false | null | IDENT [ '::' IDENT ] | '(' expr ')'
+
+    ExprPtr Parser::parse_expression() { return parse_or(); }
+
+    ExprPtr Parser::parse_or() {
+        ExprPtr lhs = parse_and();
+        while (check(TokenType::OR)) {
+            const Token& op = advance();
+            ExprPtr rhs = parse_and();
+            BinaryOp b; b.op = op.text; b.lhs = lhs; b.rhs = rhs;
+            lhs = make_expr(std::move(b), op.line, op.col);
+        }
+        return lhs;
+    }
+
+    ExprPtr Parser::parse_and() {
+        ExprPtr lhs = parse_equality();
+        while (check(TokenType::AND)) {
+            const Token& op = advance();
+            ExprPtr rhs = parse_equality();
+            BinaryOp b; b.op = op.text; b.lhs = lhs; b.rhs = rhs;
+            lhs = make_expr(std::move(b), op.line, op.col);
+        }
+        return lhs;
+    }
+
+    ExprPtr Parser::parse_equality() {
+        ExprPtr lhs = parse_comparison();
+        while (check(TokenType::EQ) || check(TokenType::NEQ)) {
+            const Token& op = advance();
+            ExprPtr rhs = parse_comparison();
+            BinaryOp b; b.op = op.text; b.lhs = lhs; b.rhs = rhs;
+            lhs = make_expr(std::move(b), op.line, op.col);
+        }
+        return lhs;
+    }
+
+    ExprPtr Parser::parse_comparison() {
+        ExprPtr lhs = parse_additive();
+        while (check(TokenType::LT) || check(TokenType::GT) || check(TokenType::LTE) || check(TokenType::GTE)) {
+            const Token& op = advance();
+            ExprPtr rhs = parse_additive();
+            BinaryOp b; b.op = op.text; b.lhs = lhs; b.rhs = rhs;
+            lhs = make_expr(std::move(b), op.line, op.col);
+        }
+        return lhs;
+    }
+
+    ExprPtr Parser::parse_additive() {
+        ExprPtr lhs = parse_unary();
+        while (check(TokenType::PLUS) || check(TokenType::MINUS)) {
+            const Token& op = advance();
+            ExprPtr rhs = parse_unary();
+            BinaryOp b; b.op = op.text; b.lhs = lhs; b.rhs = rhs;
+            lhs = make_expr(std::move(b), op.line, op.col);
+        }
+        return lhs;
+    }
+
+    ExprPtr Parser::parse_unary() {
+        if (check(TokenType::BANG) || check(TokenType::MINUS)) {
+            const Token& op = advance();
+            ExprPtr operand = parse_unary();
+            UnaryOp u; u.op = op.text; u.operand = operand;
+            return make_expr(std::move(u), op.line, op.col);
+        }
+        return parse_postfix();
+    }
+
+    std::vector<CallArg> Parser::parse_call_args() {
+        std::vector<CallArg> args;
+        expect(TokenType::LPAREN, "'('");
+        while (!check(TokenType::RPAREN) && !check(TokenType::END_OF_FILE)) {
+            CallArg a;
+            // Named argument?  IDENT ':' expr
+            if (check(TokenType::IDENT) && peek(1).type == TokenType::COLON) {
+                a.name = advance().text;
+                advance();  // ':'
+            }
+            a.value = parse_expression();
+            args.push_back(std::move(a));
+            if (!match(TokenType::COMMA)) break;
+        }
+        expect(TokenType::RPAREN, "')'");
+        return args;
+    }
+
+    ExprPtr Parser::parse_postfix() {
+        ExprPtr node = parse_primary();
+        while (true) {
+            if (check(TokenType::DOT)) {
+                const Token& dot = advance();
+                const Token& name = expect(TokenType::IDENT, "member name after '.'");
+                MemberAccess m;
+                m.object = node;
+                m.member = name.text;
+                node = make_expr(std::move(m), dot.line, dot.col);
+            } else if (check(TokenType::LPAREN)) {
+                int line = peek().line, col = peek().col;
+                Call c;
+                c.callee = node;
+                c.args = parse_call_args();
+                // trailing block:  ident.member { ... }
+                if (check(TokenType::LBRACE)) {
+                    c.has_block = true;
+                    c.trailing_block = parse_block();
+                }
+                node = make_expr(std::move(c), line, col);
+            } else if (check(TokenType::LBRACE)) {
+                // implicit-call trailing block:  plugin.run { ... }
+                int line = peek().line, col = peek().col;
+                Call c;
+                c.callee = node;
+                c.has_block = true;
+                c.trailing_block = parse_block();
+                node = make_expr(std::move(c), line, col);
+            } else {
+                break;
+            }
+        }
+        return node;
+    }
+
+    ExprPtr Parser::parse_primary() {
+        const Token& t = peek();
+
+        if (check(TokenType::NUMBER)) {
+            advance();
+            LiteralNumber n; n.value = std::stod(t.text);
+            return make_expr(std::move(n), t.line, t.col);
+        }
+        if (check(TokenType::STRING)) {
+            advance();
+            LiteralString s; s.value = t.text;
+            return make_expr(std::move(s), t.line, t.col);
+        }
+        if (check(TokenType::TRUE_KW))  { advance(); LiteralBool b{true};  return make_expr(std::move(b), t.line, t.col); }
+        if (check(TokenType::FALSE_KW)) { advance(); LiteralBool b{false}; return make_expr(std::move(b), t.line, t.col); }
+        if (check(TokenType::NULL_KW))  { advance(); return make_expr(LiteralNull{}, t.line, t.col); }
+
+        if (check(TokenType::IDENT)) {
+            const Token& id = advance();
+            if (check(TokenType::SCOPE)) {
+                advance();
+                const Token& name = expect(TokenType::IDENT, "name after '::'");
+                ScopedAccess s;
+                s.scope = id.text;
+                s.name = name.text;
+                return make_expr(std::move(s), id.line, id.col);
+            }
+            Identifier i; i.name = id.text;
+            return make_expr(std::move(i), id.line, id.col);
+        }
+
+        if (check(TokenType::LPAREN)) {
+            advance();
+            ExprPtr e = parse_expression();
+            expect(TokenType::RPAREN, "')'");
+            return e;
+        }
+
+        throw ParseError("unexpected token '" + t.text + "'", t.line, t.col);
     }
 }
