@@ -1,0 +1,117 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("smtp-open-relay-check");
+plugin.description("Checks whether an SMTP server permits unauthenticated relay to an external recipient.");
+plugin.category("vulnerability");
+plugin.filter(service: "smtp");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("220")) {
+        return;
+    }
+
+    conn.send("EHLO zerotrust.invalid\r\n");
+
+    ehlo_response = conn.recv(timeout_ms: 2000);
+    ehlo_response = ehlo_response.trim();
+
+    if (ehlo_response == "") {
+        return;
+    }
+
+    if (!ehlo_response.starts_with("250")) {
+        conn.send("HELO zerotrust.invalid\r\n");
+
+        helo_response = conn.recv(timeout_ms: 2000);
+        helo_response = helo_response.trim();
+
+        if (!helo_response.starts_with("250")) {
+            return;
+        }
+    }
+
+    conn.send("MAIL FROM:<scanner@zerotrust.invalid>\r\n");
+
+    mail_response = conn.recv(timeout_ms: 2000);
+    mail_response = mail_response.trim();
+
+    if (mail_response == "") {
+        return;
+    }
+
+    if (!mail_response.starts_with("250")) {
+        conn.send("QUIT\r\n");
+        return;
+    }
+
+    conn.send("RCPT TO:<probe@external.invalid>\r\n");
+
+    rcpt_response = conn.recv(timeout_ms: 2000);
+    rcpt_response = rcpt_response.trim();
+
+    conn.send("RSET\r\n");
+
+    reset_response = conn.recv(timeout_ms: 1000);
+
+    conn.send("QUIT\r\n");
+
+    if (rcpt_response == "") {
+        return;
+    }
+
+    if (rcpt_response.starts_with("250") ||
+        rcpt_response.starts_with("251")) {
+        finding(
+            severity: "high",
+            title: "Potential SMTP open relay",
+            description: "The SMTP server accepted an unauthenticated MAIL FROM followed by an external RCPT TO address.",
+            evidence: "MAIL FROM returned: " + mail_response +
+                     "; RCPT TO returned: " + rcpt_response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.95,
+            remediation: "Require authentication or restrict relay destinations to authorized domains and networks."
+        );
+
+        kb.set_scoped(
+            "port",
+            "smtp.open_relay",
+            true
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "smtp.open_relay",
+        false
+    );
+
+    finding(
+        severity: "info",
+        title: "SMTP relay rejected",
+        description: "The SMTP server did not accept the unauthenticated external recipient during the relay test.",
+        evidence: "MAIL FROM returned: " + mail_response +
+                 "; RCPT TO returned: " + rcpt_response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

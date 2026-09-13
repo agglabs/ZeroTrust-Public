@@ -48,80 +48,11 @@ namespace {
         return patterns;
     }
 
-    // --- Probes PASYWNE: banner juz mamy, tylko go parsujemy ---
-    // Zeby dodac kolejna baze danych wysylajaca dane same z siebie,
-    // dopisz nowa funkcje bool(core::Port&, const std::string&) i dodaj ja do binary_probes.
+    // Service detection lives in ZTL plugins (`data/plugins/*-detect.ztl`).
+    // The regex path below still runs for the ~11k nmap patterns, but every
+    // binary-protocol handshake (MySQL, PostgreSQL, ...) is handled by a plugin
+    // and can override anything the regex path guessed.
 
-    bool try_mysql(core::Port& port, const std::string& banner) {
-        if (banner.size() < 6) {
-            return false;
-        }
-
-        std::uint8_t protocol_version = static_cast<std::uint8_t>(banner[4]);
-
-        if (protocol_version != 0x0a) {
-            return false;
-        }
-
-        std::size_t version_start = 5;
-        std::size_t version_end = banner.find('\0', version_start);
-
-        if (version_end == std::string::npos) {
-            return false;
-        }
-
-        port.service = "mysql";
-        port.product = "MySQL";
-        port.version = banner.substr(version_start, version_end - version_start);
-
-        return true;
-    }
-
-    using BinaryProbe = bool (*)(core::Port&, const std::string&);
-
-    std::vector<BinaryProbe> binary_probes = {
-        try_mysql,
-    };
-
-    // --- Probes AKTYWNE: trzeba cos wyslac, zanim cokolwiek przyjdzie ---
-    // Zeby dodac kolejna baze danych wymagajaca zapytania,
-    // dopisz nowa funkcje bool(transport::Tcp&, core::Port&) i dodaj ja do active_probes.
-
-    bool try_postgresql(transport::Tcp& tcp, core::Port& port) {
-        std::vector<std::uint8_t> ssl_request = {
-            0x00, 0x00, 0x00, 0x08,
-            0x04, 0xD2, 0x16, 0x2F
-        };
-
-        std::string probe(
-            reinterpret_cast<const char*>(ssl_request.data()),
-            ssl_request.size()
-        );
-
-        if (!tcp.send(probe)) {
-            return false;
-        }
-
-        std::string response = tcp.receive(800);
-
-        if (response.size() != 1) {
-            return false;
-        }
-
-        if (response[0] == 'S' || response[0] == 'N') {
-            port.service = "postgresql";
-            port.product = "PostgreSQL";
-            return true;
-        }
-
-        return false;
-    }
-
-    using ActiveProbe = bool (*)(transport::Tcp&, core::Port&);
-
-    std::vector<ActiveProbe> active_probes = {
-        try_postgresql,
-    };
 }
 
 namespace processor {
@@ -186,23 +117,7 @@ namespace processor {
             }
         }
 
-        for (const BinaryProbe& probe : binary_probes) {
-            if (probe(port, banner)) {
-                return;
-            }
-        }
-
         port.service = "";
-    }
-
-    bool try_active_probe(transport::Tcp& tcp, core::Port& port) {
-        for (const ActiveProbe& probe : active_probes) {
-            if (probe(tcp, port)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     void detect_distro(core::Port& port, const std::string& banner) {

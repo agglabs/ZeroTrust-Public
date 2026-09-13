@@ -1,0 +1,81 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tls-certificate-signature-check");
+plugin.description("Checks the TLS certificate signature algorithm for obsolete or weak algorithms.");
+plugin.category("vulnerability");
+plugin.filter(service: "https");
+
+plugin.run {
+    tls = net::tls(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    report = tls.handshake();
+
+    if (!report.ok) {
+        return;
+    }
+
+    if (report.result != "OK") {
+        return;
+    }
+
+    if (!report.certificate_present) {
+        return;
+    }
+
+    algorithm = report.signature_algorithm;
+
+    if (algorithm == "") {
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "tls.signature_algorithm",
+        algorithm
+    );
+
+    algorithm_lower = algorithm.to_lower();
+
+    if (algorithm_lower.contains("md5")) {
+        finding(
+            severity: "critical",
+            title: "TLS certificate uses MD5 signature",
+            description: "The server certificate is signed using the obsolete MD5 hash algorithm.",
+            evidence: "Signature algorithm: " + algorithm,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Replace the certificate with one using a modern signature algorithm such as SHA-256 or stronger."
+        );
+
+        return;
+    }
+
+    if (algorithm_lower.contains("sha1") ||
+        algorithm_lower.contains("sha-1")) {
+        finding(
+            severity: "high",
+            title: "TLS certificate uses SHA-1 signature",
+            description: "The server certificate is signed using the deprecated SHA-1 hash algorithm.",
+            evidence: "Signature algorithm: " + algorithm,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Replace the certificate with one using a modern signature algorithm such as SHA-256 or stronger."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "TLS certificate signature algorithm inspected",
+        description: "The certificate signature algorithm was inspected and did not match the checked obsolete algorithms.",
+        evidence: "Signature algorithm: " + algorithm,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

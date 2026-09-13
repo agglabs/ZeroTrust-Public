@@ -1,0 +1,118 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-cookie-security-check");
+plugin.description("Checks HTTP Set-Cookie attributes for common cookie security weaknesses.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    set_cookie = response.headers().header("Set-Cookie");
+
+    if (!set_cookie.exists()) {
+        return;
+    }
+
+    cookie = set_cookie.value();
+
+    if (cookie == "") {
+        return;
+    }
+
+    cookie_lower = cookie.to_lower();
+
+    has_secure = cookie_lower.contains("secure");
+    has_httponly = cookie_lower.contains("httponly");
+    has_samesite = cookie_lower.contains("samesite");
+
+    kb.set_scoped(
+        "port",
+        "http.cookie.set_cookie",
+        cookie
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.cookie.secure",
+        has_secure
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.cookie.httponly",
+        has_httponly
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.cookie.samesite",
+        has_samesite
+    );
+
+    if (!has_secure && !has_httponly && !has_samesite) {
+        finding(
+            severity: "medium",
+            title: "HTTP cookie missing security attributes",
+            description: "The server issued a cookie without Secure, HttpOnly and SameSite attributes.",
+            evidence: "Set-Cookie: " + cookie,
+            verification: "CONFIG_MATCH",
+            confidence: 0.95,
+            remediation: "Set Secure, HttpOnly and an appropriate SameSite attribute on sensitive cookies."
+        );
+
+        return;
+    }
+
+    if (!has_secure) {
+        finding(
+            severity: "medium",
+            title: "HTTP cookie missing Secure attribute",
+            description: "The server issued a cookie without the Secure attribute.",
+            evidence: "Set-Cookie: " + cookie,
+            verification: "CONFIG_MATCH",
+            confidence: 0.95,
+            remediation: "Add the Secure attribute to cookies that should only be transmitted over HTTPS."
+        );
+    }
+
+    if (!has_httponly) {
+        finding(
+            severity: "low",
+            title: "HTTP cookie missing HttpOnly attribute",
+            description: "The server issued a cookie without the HttpOnly attribute.",
+            evidence: "Set-Cookie: " + cookie,
+            verification: "CONFIG_MATCH",
+            confidence: 0.95,
+            remediation: "Add the HttpOnly attribute to cookies that do not need to be accessed by client-side JavaScript."
+        );
+    }
+
+    if (!has_samesite) {
+        finding(
+            severity: "low",
+            title: "HTTP cookie missing SameSite attribute",
+            description: "The server issued a cookie without an explicit SameSite attribute.",
+            evidence: "Set-Cookie: " + cookie,
+            verification: "CONFIG_MATCH",
+            confidence: 0.95,
+            remediation: "Configure an appropriate SameSite value such as Lax or Strict for sensitive cookies."
+        );
+    }
+}

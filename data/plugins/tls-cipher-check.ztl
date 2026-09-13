@@ -1,0 +1,137 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tls-cipher-check");
+plugin.description("Checks the negotiated TLS cipher suite for weak or obsolete cryptographic algorithms.");
+plugin.category("vulnerability");
+plugin.filter(service: "https");
+
+plugin.run {
+    tls = net::tls(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    report = tls.handshake();
+
+    if (!report.ok) {
+        return;
+    }
+
+    if (report.result != "OK") {
+        return;
+    }
+
+    if (!report.certificate_present) {
+        return;
+    }
+
+    cipher = report.cipher;
+
+    if (cipher == "") {
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "tls.cipher",
+        cipher
+    );
+
+    cipher_lower = cipher.to_lower();
+
+    if (cipher_lower.contains("null")) {
+        finding(
+            severity: "critical",
+            title: "NULL TLS cipher detected",
+            description: "The negotiated TLS cipher suite does not provide encryption.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable NULL cipher suites and require an authenticated encrypted cipher."
+        );
+
+        return;
+    }
+
+    if (cipher_lower.contains("export")) {
+        finding(
+            severity: "critical",
+            title: "EXPORT TLS cipher detected",
+            description: "The negotiated TLS cipher suite uses obsolete EXPORT-grade cryptography.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable EXPORT cipher suites and allow only modern cryptographic suites."
+        );
+
+        return;
+    }
+
+    if (cipher_lower.contains("rc4")) {
+        finding(
+            severity: "high",
+            title: "RC4 TLS cipher detected",
+            description: "The negotiated TLS cipher suite uses the obsolete RC4 stream cipher.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable RC4 cipher suites and use modern AES-GCM or ChaCha20-Poly1305 suites."
+        );
+
+        return;
+    }
+
+    if (cipher_lower.contains("3des") ||
+        cipher_lower.contains("des-cbc")) {
+        finding(
+            severity: "high",
+            title: "3DES or DES TLS cipher detected",
+            description: "The negotiated TLS cipher suite uses an obsolete DES-based cipher.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable 3DES and DES cipher suites and use modern authenticated encryption."
+        );
+
+        return;
+    }
+
+    if (cipher_lower.contains("md5")) {
+        finding(
+            severity: "high",
+            title: "MD5-based TLS cipher detected",
+            description: "The negotiated TLS cipher suite uses the obsolete MD5 hash algorithm.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable MD5-based cipher suites and use modern TLS cipher suites."
+        );
+
+        return;
+    }
+
+    if (cipher_lower.contains("rc2")) {
+        finding(
+            severity: "high",
+            title: "RC2 TLS cipher detected",
+            description: "The negotiated TLS cipher suite uses the obsolete RC2 algorithm.",
+            evidence: "Negotiated cipher: " + cipher,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable RC2 cipher suites and use modern authenticated encryption."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "TLS cipher inspected",
+        description: "The TLS handshake completed and the negotiated cipher suite did not match the checked legacy algorithms.",
+        evidence: "Negotiated cipher: " + cipher,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.95
+    );
+}

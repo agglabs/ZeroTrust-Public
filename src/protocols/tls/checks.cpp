@@ -30,11 +30,16 @@ namespace {
         f.title       = title;
         f.severity    = severity;
         f.confidence  = core::Confidence::VERIFIED;
+        f.confidence_score = 0.99;
+        f.verification = "ACTIVE_CHECK";
+        f.timestamp = core::current_timestamp();
         f.port_number = port.number;
         f.service     = port.service;
         f.product     = port.product;
         f.version     = port.version;
         f.description = description;
+        f.evidence    = description;
+        f.evidence_data = {"protocol", "tls-handshake", description, plugin_name};
         return f;
     }
 

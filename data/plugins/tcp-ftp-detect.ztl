@@ -1,0 +1,137 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-ftp-detect");
+plugin.description("Strong FTP service discovery using the FTP greeting response.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("220")) {
+        return;
+    }
+
+    if (banner.length() < 7) {
+        return;
+    }
+
+    third = banner.byte_at(3);
+
+    if (third != 32 && third != 45) {
+        return;
+    }
+
+    product = "";
+    version = "";
+
+    banner_lower = banner.to_lower();
+
+    if (banner_lower.contains("vsftpd")) {
+        product = "vsftpd";
+
+        marker = banner_lower.index_of("vsftpd ");
+
+        if (marker >= 0) {
+            version_start = marker + 7;
+            version_data = banner.slice(
+                version_start,
+                banner.length() - version_start
+            );
+
+            space = version_data.index_of(" ");
+
+            if (space >= 0) {
+                version = version_data.slice(
+                    0,
+                    space
+                );
+            } else {
+                version = version_data;
+            }
+        }
+    } else if (banner_lower.contains("proftpd")) {
+        product = "ProFTPD";
+
+        marker = banner_lower.index_of("proftpd ");
+
+        if (marker >= 0) {
+            version_start = marker + 7;
+            version_data = banner.slice(
+                version_start,
+                banner.length() - version_start
+            );
+
+            space = version_data.index_of(" ");
+
+            if (space >= 0) {
+                version = version_data.slice(
+                    0,
+                    space
+                );
+            } else {
+                version = version_data;
+            }
+        }
+    } else if (banner_lower.contains("filezilla")) {
+        product = "FileZilla Server";
+    } else if (banner_lower.contains("pure-ftpd")) {
+        product = "Pure-FTPd";
+    } else if (banner_lower.contains("microsoft")) {
+        product = "Microsoft FTP";
+    } else {
+        product = "FTP";
+    }
+
+    plugin.set_service(
+        "ftp",
+        banner: banner,
+        product: product,
+        version: version
+    );
+
+    kb.set_scoped(
+        "port",
+        "ftp.banner",
+        banner
+    );
+
+    kb.set_scoped(
+        "port",
+        "ftp.product",
+        product
+    );
+
+    if (version != "") {
+        kb.set_scoped(
+            "port",
+            "ftp.version",
+            version
+        );
+    }
+
+    finding(
+        severity: "info",
+        title: "FTP service detected",
+        description: "The target returned a valid FTP service greeting on the scanned TCP port.",
+        evidence: banner,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

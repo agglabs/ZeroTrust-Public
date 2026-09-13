@@ -1,0 +1,62 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-redis-detect");
+plugin.description("Strong Redis service discovery using a deterministic RESP PING request.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    request = "*1\r\n$4\r\nPING\r\n";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2000);
+    response = response.trim();
+
+    if (response == "") {
+        return;
+    }
+
+    if (response != "+PONG") {
+        return;
+    }
+
+    plugin.set_service(
+        "redis",
+        banner: response,
+        product: "Redis",
+        version: ""
+    );
+
+    kb.set_scoped(
+        "port",
+        "redis.response",
+        response
+    );
+
+    kb.set_scoped(
+        "port",
+        "redis.product",
+        "Redis"
+    );
+
+    finding(
+        severity: "info",
+        title: "Redis service detected",
+        description: "The target returned the expected Redis RESP PONG response to a deterministic PING request.",
+        evidence: response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

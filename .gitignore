@@ -5,4 +5,9 @@ scan.json
 .vscode/
 tests
 compile_commands.json
-scan.json
+
+# Runtime SQLite database + WAL/shared-memory sidecars
+data/zerotrust.db
+data/zerotrust.db-shm
+data/zerotrust.db-wal
+

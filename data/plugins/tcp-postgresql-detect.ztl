@@ -1,0 +1,174 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-postgresql-detect");
+plugin.description("Strong PostgreSQL service discovery using the PostgreSQL startup protocol.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * PostgreSQL SSLRequest:
+     *
+     * length = 8
+     * protocol = 80877103
+     *
+     * A PostgreSQL server responds with:
+     *   S = SSL supported
+     *   N = SSL not supported
+     *
+     * We use this first because it is a deterministic
+     * PostgreSQL protocol response.
+     */
+
+    ssl_request = "\x00\x00\x00\x08\x04\xd2\x16\x2f";
+
+    conn.send(ssl_request);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 1) {
+        return;
+    }
+
+    marker = response.byte_at(0);
+
+    if (marker != 83 && marker != 78) {
+        return;
+    }
+
+    /*
+     * Send a minimal PostgreSQL StartupMessage.
+     *
+     * protocol 3.0 = 196608
+     * user = zt
+     * database = postgres
+     */
+
+    startup = "\x00\x00\x00\x1f"
+            + "\x00\x03\x00\x00"
+            + "user\x00zt\x00"
+            + "database\x00postgres\x00"
+            + "\x00";
+
+    conn.send(startup);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 5) {
+        return;
+    }
+
+    message_type = response.byte_at(0);
+
+    /*
+     * Valid PostgreSQL responses include:
+     *
+     * R = Authentication
+     * E = ErrorResponse
+     * S = ParameterStatus
+     * Z = ReadyForQuery
+     */
+
+    if (message_type != 82 &&
+        message_type != 69 &&
+        message_type != 83 &&
+        message_type != 90) {
+        return;
+    }
+
+    product = "PostgreSQL";
+    version = "";
+
+    /*
+     * ParameterStatus can expose server_version.
+     * If the first response is Authentication or ErrorResponse,
+     * discovery remains valid but version may be unavailable.
+     */
+
+    if (message_type == 83) {
+        if (response.contains("server_version")) {
+            marker_text = "server_version";
+
+            marker_position = response.index_of(marker_text);
+
+            if (marker_position >= 0) {
+                value_start = marker_position + 14;
+
+                if (value_start < response.length()) {
+                    version_data = response.slice(
+                        value_start,
+                        response.length() - value_start
+                    );
+
+                    separator = version_data.index_of("\x00");
+
+                    if (separator >= 0) {
+                        version = version_data.slice(
+                            0,
+                            separator
+                        );
+                    } else {
+                        version = version_data;
+                    }
+
+                    version = version.trim();
+                }
+            }
+        }
+    }
+
+    plugin.set_service(
+        "postgresql",
+        banner: "PostgreSQL protocol",
+        product: product,
+        version: version
+    );
+
+    kb.set_scoped(
+        "port",
+        "postgresql.ssl_supported",
+        marker == 83
+    );
+
+    kb.set_scoped(
+        "port",
+        "postgresql.message_type",
+        message_type
+    );
+
+    if (version != "") {
+        kb.set_scoped(
+            "port",
+            "postgresql.version",
+            version
+        );
+    }
+
+    finding(
+        severity: "info",
+        title: "PostgreSQL service detected",
+        description: "The target returned a valid PostgreSQL protocol response to a deterministic startup probe.",
+        evidence: "PostgreSQL protocol response detected.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

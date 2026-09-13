@@ -1,0 +1,70 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-basic-auth-check");
+plugin.description("Checks whether HTTP Basic Authentication is advertised and whether it is used on a non-TLS HTTP service.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    if (status != 401) {
+        return;
+    }
+
+    auth_header = response.headers().header("WWW-Authenticate");
+
+    if (!auth_header.exists()) {
+        return;
+    }
+
+    auth = auth_header.value().trim();
+
+    if (auth == "") {
+        return;
+    }
+
+    auth_lower = auth.to_lower();
+
+    if (!auth_lower.starts_with("basic")) {
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "http.basic_auth",
+        true
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.basic_auth_header",
+        auth
+    );
+
+    finding(
+        severity: "medium",
+        title: "HTTP Basic Authentication enabled",
+        description: "The HTTP service advertises Basic Authentication. Credentials are only protected by TLS when the service is accessed through HTTPS.",
+        evidence: "WWW-Authenticate: " + auth,
+        verification: "CONFIG_MATCH",
+        confidence: 0.99,
+        remediation: "Use HTTPS for Basic Authentication and avoid exposing Basic Authentication over unencrypted HTTP."
+    );
+}

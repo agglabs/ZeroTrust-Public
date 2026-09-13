@@ -6,31 +6,103 @@
 #include "processor/thread_pool.hpp"
 #include "ztl/runner.hpp"
 #include "scan/cve.hpp"
+#include "scan/tcp_range.hpp"
 #include "core/knowledge_base.hpp"
 #include "scan/reporter.hpp"
 #include "scan/cidr.hpp"
 #include "protocols/tcp/os_fingerprint.hpp"
+#include "webui/webui.hpp"
 #include "port.h"
 #include "host.h"
 #include "finding.h"
 
 #include <iostream>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include <mutex>
 #include <algorithm>
 #include <cctype>
+#include <unordered_set>
 #include <arpa/inet.h>
 
 using namespace std;
 
+static std::string pad_right(const std::string& s, std::size_t width) {
+    if (s.size() >= width) return s;
+    return s + std::string(width - s.size(), ' ');
+}
+
+static void print_host_report(const std::string& ip,
+                              const std::string& hostname,
+                              const std::string& os_guess,
+                              int ttl,
+                              std::vector<core::Port> ports,
+                              std::vector<core::Finding> findings)
+{
+    std::sort(ports.begin(), ports.end(),
+        [](const core::Port& a, const core::Port& b) { return a.number < b.number; });
+    std::sort(findings.begin(), findings.end(),
+        [](const core::Finding& a, const core::Finding& b) { return a.port_number < b.port_number; });
+
+    cout << "\nScan report for ";
+    if (!hostname.empty()) cout << hostname << " (" << ip << ")";
+    else                   cout << ip;
+    cout << "\n";
+
+    cout << "Host is up";
+    if (!os_guess.empty() || ttl > 0) {
+        cout << " (";
+        bool first = true;
+        if (ttl > 0)              { cout << "ttl=" << ttl; first = false; }
+        if (!os_guess.empty())    { if (!first) cout << ", "; cout << "os=" << os_guess; }
+        cout << ")";
+    }
+    cout << "\n\n";
+
+    if (ports.empty()) {
+        cout << "No open ports.\n";
+    } else {
+        cout << pad_right("PORT", 10)
+             << pad_right("STATE", 7)
+             << pad_right("SERVICE", 12)
+             << "PRODUCT\n";
+
+        for (const core::Port& p : ports) {
+            std::string port_col = std::to_string(p.number) + "/tcp";
+            std::string prod = p.product;
+            if (!p.version.empty()) prod += (prod.empty() ? "" : " ") + p.version;
+            if (!p.distro.empty()) prod += (prod.empty() ? "" : " ") + std::string("[") + p.distro + "]";
+
+            cout << pad_right(port_col, 10)
+                 << pad_right("open", 7)
+                 << pad_right(p.service.empty() ? "-" : p.service, 12)
+                 << (prod.empty() ? "-" : prod)
+                 << "\n";
+        }
+    }
+
+    if (!findings.empty()) {
+        cout << "\nFindings (" << findings.size() << "):\n";
+        for (const core::Finding& f : findings) {
+            std::string sev = "[" + core::to_string(f.severity) + "]";
+            std::string conf = "[" + core::to_string(f.confidence) + "]";
+            std::string verification = "[" + core::verification_label(f.verification) + "]";
+            std::string where = std::to_string(f.port_number) + "/tcp";
+              cout << "  " << pad_right(sev, 12) << pad_right(conf, 17) << pad_right(verification, 20)
+                 << pad_right(where, 10) << f.title << "\n";
+            if (!f.description.empty()) {
+                cout << "      " << f.description << "\n";
+            }
+        }
+    }
+}
+
 int main()
 {
     processor::load_patterns("data/zt-service-probes.txt");
-    processor::load_patterns("data/zt-service-probes-nmap.txt");
-
     vuln::load_database("data/zt-cve-database.txt");
-    vuln::load_database("data/zt-cve-database-nvd.txt");
+    vuln::load_distro_fixes("data/zt-distro-fixes.txt");
 
     const std::vector<ztl::LoadedPlugin> plugins = ztl::load_plugins_dir("data/plugins");
 
@@ -42,8 +114,15 @@ int main()
     cout << "3. ICMP (ping)\n";
     cout << "4. TCP port range scan\n";
     cout << "5. Full scan (CIDR + OS fingerprint)\n";
+    cout << "6. Start web UI (SSO via AGG One)\n";
     cout << "Protocol: ";
     cin >> protocol;
+
+    if (protocol == 6)
+    {
+        webui::Config wc;
+        return webui::run(wc, plugins);
+    }
 
     string ip;
     int port = 0;
@@ -154,167 +233,8 @@ int main()
         cout << "End port: ";
         cin >> end_port;
 
-        std::mutex results_mutex;
-        std::vector<core::Port> open_ports;
-        std::vector<core::Finding> findings;
-        core::KnowledgeBase kb;
-
-        {
-            concurrency::ThreadPool pool(50);
-
-            for (int p = start_port; p <= end_port; p++)
-            {
-                pool.enqueue([ip, p, &open_ports, &findings, &results_mutex, &plugins, &kb]()
-                {
-                    transport::Tcp tcp;
-                    core::Port result = tcp.connect(ip, p, 1000);
-
-                    if (result.state == core::PortState::OPEN)
-                    {
-                        std::string banner = tcp.receive(800);
-
-                        if (banner.empty())
-                        {
-                            std::string http_request =
-                                "GET / HTTP/1.0\r\n"
-                                "Host: " + ip + "\r\n"
-                                "Connection: close\r\n\r\n";
-
-                            if (tcp.send(http_request))
-                            {
-                                banner = tcp.receive(800);
-                            }
-                        }
-
-                        if (!banner.empty())
-                        {
-                            processor::detect_service(result, banner);
-                            processor::detect_distro(result, banner);
-                        }
-
-                        if (result.service.empty())
-                        {
-                            // swiezie polaczenie - to na ktorym probowalismy
-                            // HTTP moglo zostac "zepsute" przez ta probe
-                            transport::Tcp probe_tcp;
-                            core::Port probe_check = probe_tcp.connect(ip, p, 1000);
-
-                            if (probe_check.state == core::PortState::OPEN)
-                            {
-                                processor::try_active_probe(probe_tcp, result);
-                            }
-                        }
-
-                        std::vector<core::Finding> local_findings;
-
-                        std::vector<core::Finding> native_findings = vuln::run_native_checks(result, ip, kb);
-                        for (core::Finding& f : native_findings) local_findings.push_back(std::move(f));
-
-                        {
-                            std::string detected_svc;
-                            auto plugin_findings = ztl::run_for_port(plugins, ip, result.number, result.service, detected_svc);
-                            if (result.service.empty() && !detected_svc.empty()) result.service = detected_svc;
-                            for (const auto& f : plugin_findings) {
-                                core::Finding cf;
-                                cf.plugin_name = f.plugin_name;
-                                cf.title = f.title;
-                                cf.description = f.description + (f.evidence.empty() ? "" : " | evidence: " + f.evidence);
-                                cf.port_number = f.port_number;
-                                cf.service = f.service;
-                                std::string sev = f.severity;
-                                for (auto& c : sev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                                if      (sev == "CRITICAL") cf.severity = core::Severity::CRITICAL;
-                                else if (sev == "HIGH")     cf.severity = core::Severity::HIGH;
-                                else if (sev == "MEDIUM")   cf.severity = core::Severity::MEDIUM;
-                                else if (sev == "LOW")      cf.severity = core::Severity::LOW;
-                                else                        cf.severity = core::Severity::INFO;
-                                if      (f.confidence >= 0.9) cf.confidence = core::Confidence::VERIFIED;
-                                else if (f.confidence >= 0.5) cf.confidence = core::Confidence::VERSION_MATCH;
-                                else                          cf.confidence = core::Confidence::UNKNOWN;
-                                local_findings.push_back(std::move(cf));
-                            }
-                        }
-
-                        std::vector<core::Finding> cve_findings = vuln::check_port(result);
-                        for (core::Finding& f : cve_findings) local_findings.push_back(std::move(f));
-
-                        std::lock_guard<std::mutex> lock(results_mutex);
-                        open_ports.push_back(result);
-
-                        for (const core::Finding& f : local_findings)
-                        {
-                            findings.push_back(f);
-                        }
-                    }
-                });
-            }
-        }
-
-        std::sort(open_ports.begin(), open_ports.end(), [](const core::Port& a, const core::Port& b)
-        {
-            return a.number < b.number;
-        });
-
-        cout << "\nOpen ports (" << open_ports.size() << "):\n";
-
-        for (const core::Port& p : open_ports)
-        {
-            cout << "  " << p.number << "/tcp  OPEN";
-
-            if (!p.service.empty())
-            {
-                cout << "  " << p.service;
-
-                if (!p.product.empty())
-                {
-                    cout << "  " << p.product;
-
-                    if (!p.version.empty())
-                    {
-                        cout << " " << p.version;
-                    }
-                }
-
-                if (!p.distro.empty())
-                {
-                    cout << "  [" << p.distro << "]";
-                }
-            }
-
-            cout << "\n";
-        }
-
-        std::sort(findings.begin(), findings.end(), [](const core::Finding& a, const core::Finding& b)
-        {
-            return a.port_number < b.port_number;
-        });
-
-        cout << "\nFindings (" << findings.size() << "):\n";
-
-        for (const core::Finding& f : findings)
-        {
-            cout << "  [" << core::to_string(f.severity)
-                 << "] [" << core::to_string(f.confidence) << "] "
-                 << f.title
-                 << " (port " << f.port_number << "/tcp";
-
-            if (!f.product.empty())
-            {
-                cout << ", " << f.product;
-
-                if (!f.version.empty())
-                {
-                    cout << " " << f.version;
-                }
-            }
-
-            cout << ")\n";
-
-            if (!f.description.empty())
-            {
-                cout << "      " << f.description << "\n";
-            }
-        }
+        auto result = scan::tcp_range_scan(ip, start_port, end_port, plugins);
+        print_host_report(ip, "", "", 0, result.ports, result.findings);
     }
     else if (protocol == 5)
     {
@@ -399,33 +319,39 @@ int main()
                             processor::detect_distro(result, banner);
                         }
 
-                        if (result.service.empty())
-                        {
-                            transport::Tcp probe_tcp;
-                            core::Port probe_check = probe_tcp.connect(target_ip, p, 1000);
-
-                            if (probe_check.state == core::PortState::OPEN)
-                            {
-                                processor::try_active_probe(probe_tcp, result);
-                            }
-                        }
-
                         std::vector<core::Finding> local_findings;
 
                         std::vector<core::Finding> native_findings = vuln::run_native_checks(result, target_ip, kb);
                         for (core::Finding& f : native_findings) local_findings.push_back(std::move(f));
 
                         {
-                            std::string detected_svc;
-                            auto plugin_findings = ztl::run_for_port(plugins, target_ip, result.number, result.service, detected_svc);
-                            if (result.service.empty() && !detected_svc.empty()) result.service = detected_svc;
+                            ztl::DetectedInfo detected;
+                            auto plugin_findings = ztl::run_for_port(plugins, target_ip, result.number, result.service, detected);
+                            if (!detected.service.empty()) result.service = detected.service;
+                            if (!detected.product.empty()) result.product = detected.product;
+                            if (!detected.version.empty()) result.version = detected.version;
                             for (const auto& f : plugin_findings) {
                                 core::Finding cf;
                                 cf.plugin_name = f.plugin_name;
                                 cf.title = f.title;
                                 cf.description = f.description + (f.evidence.empty() ? "" : " | evidence: " + f.evidence);
+                                cf.cve_id = f.cve_id;
+                                cf.verification = f.verification;
+                                cf.confidence_score = f.confidence_score;
                                 cf.port_number = f.port_number;
+                                cf.host = f.host;
+                                cf.protocol = f.protocol;
+                                cf.scope = f.scope;
                                 cf.service = f.service;
+                                cf.product = f.product;
+                                cf.version = f.version;
+                                cf.evidence = f.evidence;
+                                cf.evidence_data = f.evidence_data;
+                                cf.references = f.references;
+                                cf.remediation = f.remediation;
+                                cf.cvss_vector = f.cvss_vector;
+                                cf.cvss = f.cvss;
+                                cf.timestamp = f.timestamp;
                                 std::string sev = f.severity;
                                 for (auto& c : sev) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                                 if      (sev == "CRITICAL") cf.severity = core::Severity::CRITICAL;
@@ -433,15 +359,30 @@ int main()
                                 else if (sev == "MEDIUM")   cf.severity = core::Severity::MEDIUM;
                                 else if (sev == "LOW")      cf.severity = core::Severity::LOW;
                                 else                        cf.severity = core::Severity::INFO;
-                                if      (f.confidence >= 0.9) cf.confidence = core::Confidence::VERIFIED;
-                                else if (f.confidence >= 0.5) cf.confidence = core::Confidence::VERSION_MATCH;
-                                else                          cf.confidence = core::Confidence::UNKNOWN;
+                                if      (f.verification == "ACTIVE_CHECK")  cf.confidence = core::Confidence::VERIFIED;
+                                else if (f.verification == "VERSION_MATCH") cf.confidence = core::Confidence::VERSION_MATCH;
+                                else                                         cf.confidence = core::Confidence::UNKNOWN;
                                 local_findings.push_back(std::move(cf));
                             }
                         }
 
+                        std::unordered_set<std::string> plugin_cves;
+                        for (const core::Finding& f : local_findings) {
+                            if (!f.cve_id.empty()) plugin_cves.insert(f.cve_id);
+                        }
                         std::vector<core::Finding> cve_findings = vuln::check_port(result);
-                        for (core::Finding& f : cve_findings) local_findings.push_back(std::move(f));
+                        for (core::Finding& f : cve_findings) {
+                            if (!plugin_cves.count(f.cve_id)) local_findings.push_back(std::move(f));
+                        }
+
+                        for (core::Finding& f : local_findings) {
+                            if (f.host.empty()) f.host = target_ip;
+                            if (f.protocol == core::Protocol::UNKNOWN) f.protocol = result.protocol;
+                            if (f.service.empty()) f.service = result.service;
+                            if (f.product.empty()) f.product = result.product;
+                            if (f.version.empty()) f.version = result.version;
+                        }
+                        core::deduplicate_findings(local_findings);
 
                         std::lock_guard<std::mutex> lock(host_mutex);
                         host.ports.push_back(result);
@@ -457,12 +398,10 @@ int main()
 
             std::sort(host.findings.begin(), host.findings.end(),
                 [](const core::Finding& a, const core::Finding& b) { return a.port_number < b.port_number; });
+            core::deduplicate_findings(host.findings);
 
-            cout << "Host " << target_ip;
-            if (!host.os_guess.empty()) cout << " [" << host.os_guess << ", ttl=" << host.ttl << "]";
-            cout << " - " << host.ports.size() << " open ports, "
-                 << host.findings.size() << " findings\n";
-
+            print_host_report(target_ip, host.hostname, host.os_guess, host.ttl,
+                              host.ports, host.findings);
             hosts.push_back(std::move(host));
         }
 

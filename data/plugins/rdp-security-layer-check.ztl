@@ -1,0 +1,129 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("rdp-security-layer-check");
+plugin.description("Checks whether an RDP server advertises Network Level Authentication during connection negotiation.");
+plugin.category("vulnerability");
+plugin.filter(service: "rdp");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * X.224 Connection Request with RDP Negotiation Request.
+     * No authentication credentials are supplied.
+     */
+    request =
+        "\x03\x00\x00\x13" +
+        "\x0e\xe0\x00\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00\x00\x00" +
+        "\x01\x00\x08\x00\x03\x00\x00\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2500);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 11) {
+        return;
+    }
+
+    if (!response.starts_with("\x03\x00")) {
+        return;
+    }
+
+    /*
+     * RDP Negotiation Response:
+     *
+     * 03 00              TPKT
+     * ...
+     * 02                 X.224 Connection Confirm
+     *
+     * The RDP negotiation structure contains a
+     * selectedProtocol field:
+     *
+     * 0 = Standard RDP Security
+     * 1 = TLS
+     * 2 = CredSSP / NLA
+     * 3 = CredSSP with Early User Authorization
+     */
+
+    if (response.contains("\x02\x00\x00\x00")) {
+        kb.set_scoped(
+            "port",
+            "rdp.nla",
+            true
+        );
+
+        finding(
+            severity: "info",
+            title: "RDP Network Level Authentication detected",
+            description: "The RDP negotiation response indicates support for CredSSP/Network Level Authentication.",
+            evidence: "RDP negotiation response contained the CredSSP/NLA protocol selection.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.90
+        );
+
+        return;
+    }
+
+    if (response.contains("\x01\x00\x00\x00")) {
+        kb.set_scoped(
+            "port",
+            "rdp.nla",
+            false
+        );
+
+        finding(
+            severity: "medium",
+            title: "RDP TLS without NLA detected",
+            description: "The RDP negotiation selected TLS without indicating CredSSP/Network Level Authentication.",
+            evidence: "RDP negotiation response contained the TLS protocol selection.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.85,
+            remediation: "Enable Network Level Authentication (NLA) for RDP where supported."
+        );
+
+        return;
+    }
+
+    if (response.contains("\x00\x00\x00\x00")) {
+        kb.set_scoped(
+            "port",
+            "rdp.nla",
+            false
+        );
+
+        finding(
+            severity: "high",
+            title: "Legacy RDP security detected",
+            description: "The RDP negotiation did not select TLS or CredSSP/NLA and appears to permit the legacy RDP security protocol.",
+            evidence: "RDP negotiation response contained the standard RDP security protocol selection.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.80,
+            remediation: "Require TLS and Network Level Authentication for RDP."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "RDP security negotiation inconclusive",
+        description: "The RDP server responded, but the security protocol could not be determined reliably from the negotiation response.",
+        evidence: "RDP negotiation response received without a recognized protocol selection.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.70
+    );
+}

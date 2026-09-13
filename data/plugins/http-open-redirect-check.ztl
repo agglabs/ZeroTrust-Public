@@ -1,0 +1,71 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-open-redirect-check");
+plugin.description("Checks common redirect parameters for an externally controlled HTTP redirect.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/?url=https://example.invalid"
+    );
+
+    status = response.status();
+
+    if (status < 300 || status >= 400) {
+        return;
+    }
+
+    location = response.headers().header("Location");
+
+    if (!location.exists()) {
+        return;
+    }
+
+    location_value = location.value().trim();
+
+    if (location_value == "") {
+        return;
+    }
+
+    location_lower = location_value.to_lower();
+
+    if (location_lower.starts_with("https://example.invalid") ||
+        location_lower.starts_with("http://example.invalid")) {
+        finding(
+            severity: "medium",
+            title: "Potential open redirect",
+            description: "The HTTP service redirected to an externally supplied URL through a common redirect parameter.",
+            evidence: "GET /?url=https://example.invalid returned " +
+                     status + "; Location: " + location_value,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Validate redirect destinations against an explicit allowlist or use relative internal paths."
+        );
+
+        kb.set_scoped(
+            "port",
+            "http.open_redirect",
+            true
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "Redirect parameter not externally reflected",
+        description: "The tested redirect parameter did not redirect to the supplied external URL.",
+        evidence: "Location: " + location_value,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.95
+    );
+}

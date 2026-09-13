@@ -1,0 +1,122 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-rdp-detect");
+plugin.description("Strong RDP service discovery using the X.224 Connection Request and Connection Confirm exchange.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * X.224 Connection Request / RDP negotiation probe.
+     *
+     * TPKT:
+     *   03 00
+     *
+     * X.224:
+     *   06 e0
+     *
+     * The final negotiation request asks the server
+     * to negotiate RDP protocol.
+     */
+
+    request = "\x03\x00\x00\x13"
+            + "\x0e\xe0\x00\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 11) {
+        return;
+    }
+
+    /*
+     * TPKT header:
+     *   version = 3
+     *   reserved = 0
+     */
+
+    if (response.byte_at(0) != 3) {
+        return;
+    }
+
+    if (response.byte_at(1) != 0) {
+        return;
+    }
+
+    /*
+     * X.224 Connection Confirm:
+     *
+     * byte 5 should contain 0xd0.
+     */
+
+    if (response.byte_at(5) != 0xd0) {
+        return;
+    }
+
+    /*
+     * Look for the RDP negotiation response.
+     *
+     * 02 = TYPE_RDP_NEG_RSP
+     * 03 = TYPE_RDP_NEG_FAILURE
+     */
+
+    has_negotiation = false;
+
+    if (response.contains("\x02\x00\x08\x00")) {
+        has_negotiation = true;
+    }
+
+    if (response.contains("\x03\x00\x08\x00")) {
+        has_negotiation = true;
+    }
+
+    if (!has_negotiation) {
+        return;
+    }
+
+    plugin.set_service(
+        "rdp",
+        banner: "RDP X.224",
+        product: "Microsoft RDP",
+        version: ""
+    );
+
+    kb.set_scoped(
+        "port",
+        "rdp.protocol",
+        "X.224"
+    );
+
+    kb.set_scoped(
+        "port",
+        "rdp.product",
+        "Microsoft RDP"
+    );
+
+    finding(
+        severity: "info",
+        title: "RDP service detected",
+        description: "The target returned a valid X.224 RDP negotiation response.",
+        evidence: "RDP X.224 negotiation response detected.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

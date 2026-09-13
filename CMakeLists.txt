@@ -32,16 +32,19 @@ add_executable(zerotrustd
     src/ztl/runner.cpp
 
     src/scan/cve.cpp
+    src/scan/cidr.cpp
+    src/scan/reporter.cpp
+    src/scan/tcp_range.cpp
+
     src/protocols/ssh/terrapin.cpp
     src/protocols/tls/checks.cpp
 
     src/transport/tls.cpp
 
     src/core/knowledge_base.cpp
+    src/core/db.cpp
 
-    src/scan/cidr.cpp
-
-    src/scan/reporter.cpp
+    src/webui/webui.cpp
 )
 
 find_package(Threads REQUIRED)
@@ -55,6 +58,7 @@ if(APPLE AND NOT DEFINED OPENSSL_ROOT_DIR)
 endif()
 
 find_package(OpenSSL REQUIRED)
+find_package(SQLite3 REQUIRED)
 
 target_include_directories(zerotrustd
     PRIVATE
@@ -68,4 +72,45 @@ target_compile_options(zerotrustd PRIVATE
     -Wpedantic
 )
 
-target_link_libraries(zerotrustd PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(zerotrustd PRIVATE Threads::Threads OpenSSL::SSL OpenSSL::Crypto SQLite3::SQLite3)
+
+enable_testing()
+
+add_executable(zerotrust_tests
+    tests/core_tests.cpp
+    src/core/db.cpp
+    src/core/knowledge_base.cpp
+    src/logging/logging.cpp
+    src/scan/cve.cpp
+    src/protocols/ssh/terrapin.cpp
+    src/protocols/tls/checks.cpp
+    src/transport/tcp.cpp
+    src/transport/tls.cpp
+    src/ztl/lexer.cpp
+    src/ztl/parser.cpp
+    src/ztl/interpreter.cpp
+)
+
+target_include_directories(zerotrust_tests
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_compile_options(zerotrust_tests PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+
+target_link_libraries(zerotrust_tests PRIVATE
+    Threads::Threads
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    SQLite3::SQLite3
+)
+
+add_test(NAME zerotrust_core_tests COMMAND zerotrust_tests)
+set_tests_properties(zerotrust_core_tests PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+)

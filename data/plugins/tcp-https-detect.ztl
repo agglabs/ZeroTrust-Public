@@ -1,0 +1,98 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-https-detect");
+plugin.description("Strong HTTPS service discovery using a TLS handshake and certificate inspection.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    tls = net::tls(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    report = tls.handshake();
+
+    if (!report.ok) {
+        return;
+    }
+
+    if (report.result != "OK") {
+        return;
+    }
+
+    if (!report.certificate_present) {
+        return;
+    }
+
+    protocol = report.protocol_version;
+    cipher = report.cipher;
+    subject = report.subject;
+    issuer = report.issuer;
+
+    plugin.set_service(
+        "https",
+        banner: subject,
+        product: "HTTPS",
+        version: protocol
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.protocol",
+        protocol
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.cipher",
+        cipher
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.subject",
+        subject
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.issuer",
+        issuer
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.certificate_present",
+        true
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.self_signed",
+        report.self_signed
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.expired",
+        report.expired
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.days_until_expiry",
+        report.days_until_expiry
+    );
+
+    finding(
+        severity: "info",
+        title: "HTTPS service detected",
+        description: "A successful TLS handshake and server certificate were observed on the scanned TCP port.",
+        evidence: subject,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

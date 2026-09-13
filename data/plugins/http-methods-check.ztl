@@ -1,0 +1,98 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-methods-check");
+plugin.description("Inspects HTTP methods advertised by the server through the Allow response header.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "OPTIONS",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    allow = response.headers().header("Allow");
+
+    if (!allow.exists()) {
+        finding(
+            severity: "info",
+            title: "HTTP methods not advertised",
+            description: "The server did not return an Allow header for the OPTIONS request.",
+            evidence: "OPTIONS / returned HTTP status " + status,
+            verification: "CONFIG_MATCH",
+            confidence: 0.90
+        );
+
+        return;
+    }
+
+    methods = allow.value().trim();
+
+    if (methods == "") {
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "http.allow",
+        methods
+    );
+
+    if (methods.to_upper().contains("TRACE")) {
+        finding(
+            severity: "medium",
+            title: "TRACE method advertised by HTTP server",
+            description: "The server advertises TRACE in its Allow header. This does not by itself prove that TRACE requests are accepted.",
+            evidence: "Allow: " + methods,
+            verification: "CONFIG_MATCH",
+            confidence: 0.95,
+            remediation: "Remove TRACE from the advertised HTTP methods and disable it unless explicitly required."
+        );
+    }
+
+    if (methods.to_upper().contains("PUT")) {
+        finding(
+            severity: "low",
+            title: "PUT method advertised by HTTP server",
+            description: "The server advertises the PUT method. PUT can be legitimate, but should only be enabled where required and properly authorized.",
+            evidence: "Allow: " + methods,
+            verification: "CONFIG_MATCH",
+            confidence: 0.90,
+            remediation: "Disable PUT if it is not required and ensure authorization controls are enforced."
+        );
+    }
+
+    if (methods.to_upper().contains("DELETE")) {
+        finding(
+            severity: "low",
+            title: "DELETE method advertised by HTTP server",
+            description: "The server advertises the DELETE method. DELETE can be legitimate, but should only be enabled where required and properly authorized.",
+            evidence: "Allow: " + methods,
+            verification: "CONFIG_MATCH",
+            confidence: 0.90,
+            remediation: "Disable DELETE if it is not required and ensure authorization controls are enforced."
+        );
+    }
+
+    finding(
+        severity: "info",
+        title: "HTTP methods discovered",
+        description: "The server returned an Allow header describing HTTP methods advertised for the requested resource.",
+        evidence: "Allow: " + methods,
+        verification: "CONFIG_MATCH",
+        confidence: 0.95
+    );
+}

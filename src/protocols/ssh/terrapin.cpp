@@ -266,6 +266,9 @@ namespace vuln {
         f.title       = "SSH Terrapin Prefix Truncation Weakness";
         f.severity    = core::Severity::MEDIUM;
         f.confidence  = core::Confidence::VERIFIED;
+        f.confidence_score = 0.99;
+        f.verification = "ACTIVE_CHECK";
+        f.timestamp    = core::current_timestamp();
         f.cve_id      = "CVE-2023-48795";
         f.port_number = port.number;
         f.service     = port.service;
@@ -282,6 +285,8 @@ namespace vuln {
             "attack (chacha20-poly1305 or CBC-with-Encrypt-then-MAC) and does not advertise the "
             "strict key exchange countermeasure. Evidence: " + evidence +
             ". Update the SSH server or restrict the offered algorithms.";
+        f.evidence = evidence;
+        f.evidence_data = {"protocol", "ssh-kex", evidence, "SSH algorithm negotiation"};
 
         return f;
     }

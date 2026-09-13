@@ -1,0 +1,86 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("mongodb-unauthenticated-access-check");
+plugin.description("Checks whether MongoDB accepts a read-only hello command without authentication.");
+plugin.category("vulnerability");
+plugin.filter(service: "mongodb");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    request =
+        "\x3d\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\xdd\x07\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x01\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x05\x00\x00\x00" +
+        "\x10hello\x00\x01\x00\x00\x00" +
+        "\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2500);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 16) {
+        return;
+    }
+
+    if (response.contains("isWritablePrimary") ||
+        response.contains("ismaster") ||
+        response.contains("helloOk") ||
+        response.contains("maxWireVersion")) {
+
+        kb.set_scoped(
+            "port",
+            "mongodb.unauthenticated",
+            true
+        );
+
+        finding(
+            severity: "high",
+            title: "MongoDB unauthenticated access",
+            description: "The MongoDB service responded to a read-only hello request without authentication.",
+            evidence: "MongoDB returned a valid hello response containing server capability fields.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98,
+            remediation: "Enable MongoDB authentication and restrict database access to trusted networks."
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "mongodb.unauthenticated",
+        false
+    );
+
+    finding(
+        severity: "info",
+        title: "MongoDB unauthenticated access not confirmed",
+        description: "The MongoDB service did not provide sufficient evidence of unauthenticated hello access.",
+        evidence: "MongoDB response did not contain expected hello capability fields.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

@@ -1,0 +1,93 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-robots-disclosure-check");
+plugin.description("Checks robots.txt for potentially sensitive paths disclosed through crawl exclusion rules.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/robots.txt"
+    );
+
+    status = response.status();
+
+    if (status < 200 || status >= 300) {
+        return;
+    }
+
+    body = response.body();
+
+    if (body == "") {
+        return;
+    }
+
+    body_lower = body.to_lower();
+
+    if (!body_lower.contains("disallow:")) {
+        return;
+    }
+
+    sensitive = "";
+
+    if (body_lower.contains(".git")) {
+        sensitive = sensitive + ".git; ";
+    }
+
+    if (body_lower.contains(".env")) {
+        sensitive = sensitive + ".env; ";
+    }
+
+    if (body_lower.contains("admin")) {
+        sensitive = sensitive + "admin; ";
+    }
+
+    if (body_lower.contains("backup")) {
+        sensitive = sensitive + "backup; ";
+    }
+
+    if (body_lower.contains("config")) {
+        sensitive = sensitive + "config; ";
+    }
+
+    if (body_lower.contains("private")) {
+        sensitive = sensitive + "private; ";
+    }
+
+    if (sensitive == "") {
+        finding(
+            severity: "info",
+            title: "robots.txt inspected",
+            description: "The HTTP service exposes a robots.txt file, but no commonly sensitive path was identified.",
+            evidence: "GET /robots.txt returned HTTP " + status,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.95
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "http.robots.sensitive_paths",
+        sensitive
+    );
+
+    finding(
+        severity: "low",
+        title: "Potentially sensitive paths disclosed by robots.txt",
+        description: "The robots.txt file discloses paths that may identify administrative, backup, configuration or repository locations.",
+        evidence: "Sensitive path indicators: " + sensitive,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90,
+        remediation: "Avoid exposing sensitive application structure through robots.txt and ensure all sensitive paths are independently protected."
+    );
+}

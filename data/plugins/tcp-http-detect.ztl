@@ -1,0 +1,134 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-http-detect");
+plugin.description("Strong HTTP service discovery using a protocol-valid HEAD request and response validation.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "HEAD",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    server_header = response.headers().header("Server");
+
+    server = "";
+
+    if (server_header.exists()) {
+        server = server_header.value().trim();
+    }
+
+    product = "";
+    version = "";
+
+    if (server != "") {
+        if (server.starts_with("nginx/")) {
+            product = "nginx";
+
+            version_data = server.slice(
+                6,
+                server.length() - 6
+            );
+
+            separator = version_data.index_of(" ");
+
+            if (separator >= 0) {
+                version = version_data.slice(
+                    0,
+                    separator
+                );
+            } else {
+                version = version_data;
+            }
+        } else if (server.starts_with("Apache/")) {
+            product = "Apache";
+
+            version_data = server.slice(
+                7,
+                server.length() - 7
+            );
+
+            separator = version_data.index_of(" ");
+
+            if (separator >= 0) {
+                version = version_data.slice(
+                    0,
+                    separator
+                );
+            } else {
+                version = version_data;
+            }
+        } else if (server.starts_with("Microsoft-IIS/")) {
+            product = "Microsoft IIS";
+
+            version = server.slice(
+                15,
+                server.length() - 15
+            );
+        } else {
+            product = "HTTP";
+        }
+    } else {
+        product = "HTTP";
+    }
+
+    plugin.set_service(
+        "http",
+        banner: server,
+        product: product,
+        version: version
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.status",
+        status
+    );
+
+    if (server != "") {
+        kb.set_scoped(
+            "port",
+            "http.server",
+            server
+        );
+    }
+
+    if (product != "") {
+        kb.set_scoped(
+            "port",
+            "http.product",
+            product
+        );
+    }
+
+    if (version != "") {
+        kb.set_scoped(
+            "port",
+            "http.version",
+            version
+        );
+    }
+
+    finding(
+        severity: "info",
+        title: "HTTP service detected",
+        description: "A valid HTTP response was received from the scanned TCP port.",
+        evidence: server,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

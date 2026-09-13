@@ -1,0 +1,101 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("ftp-anonymous-access-check");
+plugin.description("Checks whether the FTP service permits anonymous authentication.");
+plugin.category("vulnerability");
+plugin.filter(service: "ftp");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("220")) {
+        return;
+    }
+
+    conn.send("USER anonymous\r\n");
+
+    user_response = conn.recv(timeout_ms: 2000);
+    user_response = user_response.trim();
+
+    if (user_response == "") {
+        return;
+    }
+
+    if (!user_response.starts_with("331")) {
+        if (user_response.starts_with("230")) {
+            finding(
+                severity: "medium",
+                title: "FTP anonymous access enabled",
+                description: "The FTP server accepted anonymous authentication without requesting a password.",
+                evidence: "USER anonymous returned: " + user_response,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Disable anonymous FTP access unless it is explicitly required."
+            );
+
+            return;
+        }
+
+        return;
+    }
+
+    conn.send("PASS anonymous@example.invalid\r\n");
+
+    pass_response = conn.recv(timeout_ms: 2000);
+    pass_response = pass_response.trim();
+
+    if (pass_response == "") {
+        return;
+    }
+
+    if (pass_response.starts_with("230")) {
+        finding(
+            severity: "medium",
+            title: "FTP anonymous access enabled",
+            description: "The FTP server accepted anonymous authentication.",
+            evidence: "USER anonymous / PASS anonymous@example.invalid returned: " + pass_response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable anonymous FTP access unless it is explicitly required."
+        );
+
+        kb.set_scoped(
+            "port",
+            "ftp.anonymous_access",
+            true
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "ftp.anonymous_access",
+        false
+    );
+
+    finding(
+        severity: "info",
+        title: "FTP anonymous access not accepted",
+        description: "The FTP server did not accept anonymous authentication.",
+        evidence: "Anonymous authentication returned: " + pass_response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

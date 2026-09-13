@@ -1,0 +1,90 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("ftp-cleartext-auth-check");
+plugin.description("Checks whether an FTP server supports TLS before authentication.");
+plugin.category("vulnerability");
+plugin.filter(service: "ftp");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("220")) {
+        return;
+    }
+
+    conn.send("AUTH TLS\r\n");
+
+    response = conn.recv(timeout_ms: 2000);
+    response = response.trim();
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.starts_with("234") ||
+        response.starts_with("334")) {
+        kb.set_scoped(
+            "port",
+            "ftp.tls",
+            true
+        );
+
+        finding(
+            severity: "info",
+            title: "FTP TLS authentication supported",
+            description: "The FTP server supports upgrading the control connection to TLS before authentication.",
+            evidence: "AUTH TLS returned: " + response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        return;
+    }
+
+    if (response.starts_with("502") ||
+        response.starts_with("500") ||
+        response.starts_with("504")) {
+        kb.set_scoped(
+            "port",
+            "ftp.tls",
+            false
+        );
+
+        finding(
+            severity: "medium",
+            title: "FTP cleartext authentication possible",
+            description: "The FTP server does not advertise support for AUTH TLS and may require credentials over an unencrypted control connection.",
+            evidence: "AUTH TLS returned: " + response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.95,
+            remediation: "Enable explicit FTP over TLS or replace plain FTP with a secure file transfer protocol such as SFTP."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "FTP TLS capability inconclusive",
+        description: "The FTP server returned an unexpected response to AUTH TLS.",
+        evidence: "AUTH TLS returned: " + response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.85
+    );
+}

@@ -1,0 +1,109 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("pop3-cleartext-auth-check");
+plugin.description("Checks whether a POP3 service exposes authentication without requiring TLS.");
+plugin.category("vulnerability");
+plugin.filter(service: "pop3");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("+OK")) {
+        return;
+    }
+
+    conn.send("CAPA\r\n");
+
+    response = conn.recv(timeout_ms: 2000);
+    response = response.trim();
+
+    if (response == "") {
+        return;
+    }
+
+    response_lower = response.to_lower();
+
+    has_stls = response_lower.contains("stls");
+    has_auth = response_lower.contains("sasl") ||
+               response_lower.contains("auth") ||
+               response_lower.contains("plain") ||
+               response_lower.contains("login");
+
+    kb.set_scoped(
+        "port",
+        "pop3.stls",
+        has_stls
+    );
+
+    kb.set_scoped(
+        "port",
+        "pop3.auth_advertised",
+        has_auth
+    );
+
+    if (has_auth && !has_stls) {
+        finding(
+            severity: "high",
+            title: "POP3 authentication exposed without STLS",
+            description: "The POP3 server advertises authentication capabilities but does not advertise STLS. Credentials may therefore be exposed over an unencrypted connection.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.97,
+            remediation: "Require TLS before authentication and disable plaintext authentication on unencrypted POP3 connections."
+        );
+
+        return;
+    }
+
+    if (has_stls && has_auth) {
+        finding(
+            severity: "info",
+            title: "POP3 STLS available",
+            description: "The POP3 server advertises both TLS upgrade support and authentication capabilities.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98
+        );
+
+        return;
+    }
+
+    if (!has_stls) {
+        finding(
+            severity: "medium",
+            title: "POP3 STLS not advertised",
+            description: "The POP3 server does not advertise STLS capability.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.95,
+            remediation: "Enable STLS for POP3 or use an implicit TLS endpoint."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "POP3 authentication capabilities detected",
+        description: "The POP3 capability response was received without confirming a cleartext authentication exposure.",
+        evidence: response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

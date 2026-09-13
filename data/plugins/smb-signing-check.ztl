@@ -1,0 +1,154 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("smb-signing-check");
+plugin.description("Checks whether an SMB2 server requires message signing.");
+plugin.category("vulnerability");
+plugin.filter(service: "smb");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * SMB2 NEGOTIATE request.
+     * One dialect (SMB 2.0.2), no negotiate contexts.
+     */
+    request =
+        "\x00\x00\x00\x64" +
+        "\xfeSMB" +
+        "\x40\x00" +
+        "\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x24\x00" +
+        "\x01\x00" +
+        "\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x02\x02" +
+        "\x00\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2500);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 68) {
+        return;
+    }
+
+    if (!response.starts_with("\xfeSMB")) {
+        return;
+    }
+
+    /*
+     * SMB2 NEGOTIATE response:
+     *   offset 64-65: StructureSize
+     *   offset 66-67: SecurityMode
+     *
+     * SecurityMode:
+     *   bit 0 = signing enabled
+     *   bit 1 = signing required
+     *
+     * ZTL currently has no bitwise operators, so inspect
+     * the two possible byte values directly.
+     */
+    security_mode_low = response.byte_at(66);
+
+    kb.set_scoped(
+        "port",
+        "smb.security_mode",
+        security_mode_low
+    );
+
+    if (security_mode_low == 3) {
+        finding(
+            severity: "info",
+            title: "SMB signing required",
+            description: "The SMB2 server requires message signing.",
+            evidence: "SMB2 SecurityMode indicates signing enabled and required.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        kb.set_scoped(
+            "port",
+            "smb.signing_required",
+            true
+        );
+
+        return;
+    }
+
+    if (security_mode_low == 1) {
+        finding(
+            severity: "high",
+            title: "SMB signing not required",
+            description: "The SMB2 server supports message signing but does not require it. SMB traffic may therefore be susceptible to relay or tampering attacks depending on the authentication and network configuration.",
+            evidence: "SMB2 SecurityMode indicates signing enabled but not required.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Configure the SMB server to require message signing."
+        );
+
+        kb.set_scoped(
+            "port",
+            "smb.signing_required",
+            false
+        );
+
+        return;
+    }
+
+    if (security_mode_low == 0) {
+        finding(
+            severity: "high",
+            title: "SMB signing disabled",
+            description: "The SMB2 server neither enables nor requires message signing.",
+            evidence: "SMB2 SecurityMode is 0.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Enable and require SMB message signing."
+        );
+
+        kb.set_scoped(
+            "port",
+            "smb.signing_required",
+            false
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "medium",
+        title: "Unknown SMB signing configuration",
+        description: "The SMB2 server returned an unrecognized SecurityMode value.",
+        evidence: "SecurityMode: " + security_mode_low,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

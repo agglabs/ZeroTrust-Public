@@ -1,0 +1,110 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tls-protocol-check");
+plugin.description("Checks the TLS protocol version negotiated by the server.");
+plugin.category("vulnerability");
+plugin.filter(service: "https");
+
+plugin.run {
+    tls = net::tls(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    report = tls.handshake();
+
+    if (!report.ok) {
+        return;
+    }
+
+    if (report.result != "OK") {
+        return;
+    }
+
+    if (!report.certificate_present) {
+        return;
+    }
+
+    protocol = report.protocol_version;
+
+    if (protocol == "") {
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "tls.protocol",
+        protocol
+    );
+
+    if (protocol == "TLSv1.0" ||
+        protocol == "TLS 1.0" ||
+        protocol == "TLSv1" ||
+        protocol == "TLS 1.0") {
+        finding(
+            severity: "high",
+            title: "TLS 1.0 enabled",
+            description: "The server negotiated the obsolete TLS 1.0 protocol.",
+            evidence: "Negotiated protocol: " + protocol,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable TLS 1.0 and require TLS 1.2 or newer."
+        );
+
+        return;
+    }
+
+    if (protocol == "TLSv1.1" ||
+        protocol == "TLS 1.1") {
+        finding(
+            severity: "high",
+            title: "TLS 1.1 enabled",
+            description: "The server negotiated the obsolete TLS 1.1 protocol.",
+            evidence: "Negotiated protocol: " + protocol,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable TLS 1.1 and require TLS 1.2 or newer."
+        );
+
+        return;
+    }
+
+    if (protocol == "TLSv1.2" ||
+        protocol == "TLS 1.2") {
+        finding(
+            severity: "info",
+            title: "TLS 1.2 negotiated",
+            description: "The server negotiated TLS 1.2.",
+            evidence: "Negotiated protocol: " + protocol,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        return;
+    }
+
+    if (protocol == "TLSv1.3" ||
+        protocol == "TLS 1.3") {
+        finding(
+            severity: "info",
+            title: "TLS 1.3 negotiated",
+            description: "The server negotiated TLS 1.3.",
+            evidence: "Negotiated protocol: " + protocol,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "medium",
+        title: "Unknown TLS protocol negotiated",
+        description: "The server negotiated a TLS protocol version that the scanner does not recognize.",
+        evidence: "Negotiated protocol: " + protocol,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

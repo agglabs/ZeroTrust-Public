@@ -1,0 +1,80 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("smtp-starttls-check");
+plugin.description("Checks whether an SMTP server advertises STARTTLS for encrypted transport.");
+plugin.category("vulnerability");
+plugin.filter(service: "smtp");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("220")) {
+        return;
+    }
+
+    conn.send("EHLO zerotrust.invalid\r\n");
+
+    response = conn.recv(timeout_ms: 2000);
+    response = response.trim();
+
+    if (response == "") {
+        return;
+    }
+
+    if (!response.starts_with("250")) {
+        return;
+    }
+
+    response_lower = response.to_lower();
+
+    if (response_lower.contains("starttls")) {
+        kb.set_scoped(
+            "port",
+            "smtp.starttls",
+            true
+        );
+
+        finding(
+            severity: "info",
+            title: "SMTP STARTTLS supported",
+            description: "The SMTP server advertises STARTTLS for upgrading the connection to TLS.",
+            evidence: "EHLO response advertises STARTTLS.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "smtp.starttls",
+        false
+    );
+
+    finding(
+        severity: "low",
+        title: "SMTP STARTTLS not advertised",
+        description: "The SMTP server does not advertise STARTTLS in response to EHLO. SMTP traffic and authentication may therefore be exposed to network interception unless another protection mechanism is used.",
+        evidence: "EHLO response did not advertise STARTTLS.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.95,
+        remediation: "Enable STARTTLS and require encrypted transport where appropriate."
+    );
+}

@@ -252,6 +252,11 @@ namespace ztl {
             auto i = s.find(p);
             return Value{i == std::string::npos ? -1.0 : static_cast<double>(i)};
         }
+        if (method == "byte_at") {
+            std::size_t i = static_cast<std::size_t>(need_num(0, "index"));
+            if (i >= s.size()) return Value{-1.0};
+            return Value{static_cast<double>(static_cast<unsigned char>(s[i]))};
+        }
         throw RuntimeError("string has no method '" + method + "'", line, col);
     }
 

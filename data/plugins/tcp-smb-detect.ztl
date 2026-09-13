@@ -1,0 +1,140 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-smb-detect");
+plugin.description("Strong SMB service discovery using an SMB2 NEGOTIATE request.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * SMB2 NEGOTIATE request over direct TCP.
+     *
+     * NetBIOS Session Service header:
+     *   00 00 00 54
+     *
+     * SMB2 header:
+     *   FE 53 4D 42
+     *
+     * Command:
+     *   00 00 = NEGOTIATE
+     */
+
+    request = "\x00\x00\x00\x54"
+            + "\xfe\x53\x4d\x42"
+            + "\x40\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00"
+            + "\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x02\x00"
+            + "\x00\x00"
+            + "\x02\x02"
+            + "\x10\x02"
+            + "\x22\x02"
+            + "\x24\x02"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00\x00\x00\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 68) {
+        return;
+    }
+
+    /*
+     * Direct TCP SMB response must contain the SMB2 signature.
+     */
+
+    if (!response.contains("\xfeSMB")) {
+        return;
+    }
+
+    /*
+     * SMB2 command is located after the 64-byte SMB2 header.
+     * NEGOTIATE command = 0x0000.
+     */
+
+    command = response.slice(12, 2);
+
+    if (command != "\x00\x00") {
+        return;
+    }
+
+    /*
+     * Validate the SMB2 header structure.
+     */
+
+    header_size = response.slice(4, 2);
+
+    if (header_size != "\x40\x00") {
+        return;
+    }
+
+    plugin.set_service(
+        "smb",
+        banner: "SMB2 NEGOTIATE",
+        product: "SMB",
+        version: "2"
+    );
+
+    kb.set_scoped(
+        "port",
+        "smb.protocol",
+        "SMB2"
+    );
+
+    kb.set_scoped(
+        "port",
+        "smb.product",
+        "SMB"
+    );
+
+    kb.set_scoped(
+        "port",
+        "smb.version",
+        "2"
+    );
+
+    finding(
+        severity: "info",
+        title: "SMB service detected",
+        description: "The target returned a valid SMB2 NEGOTIATE response over direct TCP.",
+        evidence: "SMB2 NEGOTIATE response detected.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

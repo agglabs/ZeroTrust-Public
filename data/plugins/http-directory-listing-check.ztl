@@ -1,0 +1,83 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-directory-listing-check");
+plugin.description("Checks whether the HTTP server exposes directory listings.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+        body_lower = body.to_lower();
+
+        if (body_lower.contains("index of /") ||
+            body_lower.contains("<title>index of") ||
+            body_lower.contains("directory listing for")) {
+            finding(
+                severity: "low",
+                title: "HTTP directory listing enabled",
+                description: "The HTTP server appears to expose a directory listing for the web root.",
+                evidence: "GET / returned HTTP " + status,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Disable directory indexing unless it is explicitly required."
+            );
+
+            kb.set_scoped(
+                "port",
+                "http.directory_listing",
+                true
+            );
+
+            return;
+        }
+    }
+
+    response = conn.request(
+        method: "GET",
+        path: "/backup/"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+        body_lower = body.to_lower();
+
+        if (body_lower.contains("index of /backup") ||
+            body_lower.contains("<title>index of") ||
+            body_lower.contains("directory listing for")) {
+            finding(
+                severity: "medium",
+                title: "HTTP backup directory listing enabled",
+                description: "The HTTP server appears to expose a directory listing for a backup directory.",
+                evidence: "GET /backup/ returned HTTP " + status,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Disable directory indexing and remove unnecessary backup directories from the web root."
+            );
+
+            kb.set_scoped(
+                "port",
+                "http.backup_directory_listing",
+                true
+            );
+
+            return;
+        }
+    }
+}

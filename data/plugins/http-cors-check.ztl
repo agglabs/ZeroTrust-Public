@@ -1,0 +1,104 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-cors-check");
+plugin.description("Checks HTTP CORS response headers for overly permissive cross-origin access.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    allow_origin = response.headers().header(
+        "Access-Control-Allow-Origin"
+    );
+
+    allow_credentials = response.headers().header(
+        "Access-Control-Allow-Credentials"
+    );
+
+    if (!allow_origin.exists()) {
+        return;
+    }
+
+    origin = allow_origin.value().trim();
+
+    if (origin == "") {
+        return;
+    }
+
+    credentials = false;
+
+    if (allow_credentials.exists()) {
+        credentials_value = allow_credentials.value().trim().to_lower();
+
+        if (credentials_value == "true") {
+            credentials = true;
+        }
+    }
+
+    kb.set_scoped(
+        "port",
+        "http.cors.allow_origin",
+        origin
+    );
+
+    kb.set_scoped(
+        "port",
+        "http.cors.allow_credentials",
+        credentials
+    );
+
+    if (origin == "*" && credentials) {
+        finding(
+            severity: "high",
+            title: "Permissive CORS configuration",
+            description: "The HTTP service allows any origin while also advertising credentialed cross-origin access.",
+            evidence: "Access-Control-Allow-Origin: " + origin +
+                     "; Access-Control-Allow-Credentials: true",
+            verification: "CONFIG_MATCH",
+            confidence: 0.99,
+            remediation: "Restrict Access-Control-Allow-Origin to explicitly trusted origins and review credentialed cross-origin access."
+        );
+
+        return;
+    }
+
+    if (origin == "*") {
+        finding(
+            severity: "low",
+            title: "Wildcard CORS origin enabled",
+            description: "The HTTP service allows cross-origin requests from any origin.",
+            evidence: "Access-Control-Allow-Origin: " + origin,
+            verification: "CONFIG_MATCH",
+            confidence: 0.98,
+            remediation: "Restrict CORS to explicitly trusted origins when unrestricted cross-origin access is not required."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "Restricted CORS origin detected",
+        description: "The HTTP service advertises a specific CORS origin rather than a wildcard.",
+        evidence: "Access-Control-Allow-Origin: " + origin,
+        verification: "CONFIG_MATCH",
+        confidence: 0.95
+    );
+}

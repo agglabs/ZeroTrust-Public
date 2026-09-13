@@ -1,0 +1,77 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("telnet-cleartext-auth-check");
+plugin.description("Checks whether a Telnet service exposes an unencrypted interactive session.");
+plugin.category("vulnerability");
+plugin.filter(service: "telnet");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    banner_lower = banner.to_lower();
+
+    if (banner_lower.contains("telnet") ||
+        banner_lower.contains("login") ||
+        banner_lower.contains("username") ||
+        banner_lower.contains("password") ||
+        banner_lower.contains("busybox") ||
+        banner_lower.contains("router") ||
+        banner_lower.contains("linux")) {
+
+        kb.set_scoped(
+            "port",
+            "telnet.cleartext",
+            true
+        );
+
+        finding(
+            severity: "high",
+            title: "Telnet cleartext service exposed",
+            description: "The target exposes an interactive Telnet service. Telnet does not provide transport encryption, so credentials and session data may be transmitted in cleartext.",
+            evidence: banner,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98,
+            remediation: "Disable Telnet and use SSH or another encrypted remote-access protocol."
+        );
+
+        return;
+    }
+
+    /*
+     * A valid Telnet service does not necessarily provide
+     * a recognizable banner. Since Telnet itself is plaintext,
+     * keep the result conservative when the service was already
+     * identified by the discovery plugin.
+     */
+    kb.set_scoped(
+        "port",
+        "telnet.cleartext",
+        true
+    );
+
+    finding(
+        severity: "high",
+        title: "Telnet cleartext service exposed",
+        description: "A Telnet service was detected on the target. Telnet provides no transport encryption.",
+        evidence: banner,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.95,
+        remediation: "Disable Telnet and use SSH or another encrypted remote-access protocol."
+    );
+}

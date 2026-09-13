@@ -1,0 +1,123 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("smb-dialect-check");
+plugin.description("Checks whether the SMB server accepts the legacy SMB1/CIFS protocol.");
+plugin.category("vulnerability");
+plugin.filter(service: "smb");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * SMB1 NEGOTIATE_PROTOCOL_REQUEST.
+     *
+     * Offers only the legacy NT LM 0.12 dialect.
+     * No authentication or file operation is performed.
+     */
+    request =
+        "\x00\x00\x00\x54" +
+        "\xffSMB" +
+        "\x72" +
+        "\x00\x00\x00\x00" +
+        "\x18\x53\xc0\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x00\x00" +
+        "\x02NT LM 0.12\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2500);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 36) {
+        return;
+    }
+
+    if (!response.starts_with("\xffSMB")) {
+        return;
+    }
+
+    /*
+     * SMB1 NEGOTIATE response uses command 0x72.
+     */
+    command = response.byte_at(4);
+
+    if (command != 114) {
+        return;
+    }
+
+    /*
+     * A successful SMB1 negotiate response contains
+     * a dialect/security negotiation structure.
+     *
+     * Look for the NT LM 0.12 dialect marker and reject
+     * responses that are clearly errors.
+     */
+    if (response.contains("NT LM 0.12")) {
+        kb.set_scoped(
+            "port",
+            "smb1.enabled",
+            true
+        );
+
+        finding(
+            severity: "high",
+            title: "SMBv1 enabled",
+            description: "The SMB server accepted negotiation of the legacy SMB1/CIFS protocol.",
+            evidence: "SMB1 NEGOTIATE response accepted the NT LM 0.12 dialect.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98,
+            remediation: "Disable SMBv1/CIFS and require SMB2 or newer."
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "smb1.enabled",
+        false
+    );
+
+    finding(
+        severity: "info",
+        title: "SMBv1 not confirmed",
+        description: "The SMB server did not provide sufficient evidence that the legacy SMB1/CIFS dialect was accepted.",
+        evidence: "SMB1 negotiation did not return the expected dialect marker.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

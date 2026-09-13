@@ -1,0 +1,106 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("imap-cleartext-auth-check");
+plugin.description("Checks whether an IMAP service exposes authentication mechanisms without requiring TLS.");
+plugin.category("vulnerability");
+plugin.filter(service: "imap");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    if (!banner.starts_with("* OK")) {
+        return;
+    }
+
+    conn.send("a001 CAPABILITY\r\n");
+
+    response = conn.recv(timeout_ms: 2000);
+    response = response.trim();
+
+    if (response == "") {
+        return;
+    }
+
+    response_lower = response.to_lower();
+
+    has_starttls = response_lower.contains("starttls");
+    has_auth = response_lower.contains("auth=");
+
+    kb.set_scoped(
+        "port",
+        "imap.starttls",
+        has_starttls
+    );
+
+    kb.set_scoped(
+        "port",
+        "imap.auth_advertised",
+        has_auth
+    );
+
+    if (has_auth && !has_starttls) {
+        finding(
+            severity: "high",
+            title: "IMAP authentication exposed without STARTTLS",
+            description: "The IMAP server advertises authentication mechanisms but does not advertise STARTTLS. Credentials may therefore be exposed over an unencrypted connection.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98,
+            remediation: "Require TLS before authentication and disable plaintext authentication on unencrypted IMAP connections."
+        );
+
+        return;
+    }
+
+    if (has_starttls && has_auth) {
+        finding(
+            severity: "info",
+            title: "IMAP STARTTLS available",
+            description: "The IMAP server advertises both STARTTLS and authentication mechanisms.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98
+        );
+
+        return;
+    }
+
+    if (!has_starttls) {
+        finding(
+            severity: "medium",
+            title: "IMAP STARTTLS not advertised",
+            description: "The IMAP server does not advertise STARTTLS capability.",
+            evidence: response,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.95,
+            remediation: "Enable TLS/STARTTLS for IMAP or use an implicit TLS endpoint."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "IMAP authentication capabilities detected",
+        description: "The IMAP capability response was received and did not indicate an immediate cleartext authentication exposure.",
+        evidence: response,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.90
+    );
+}

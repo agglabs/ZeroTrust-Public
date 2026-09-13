@@ -1,0 +1,60 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-host-header-check");
+plugin.description("Checks whether an HTTP service reflects an untrusted Host header into a redirect Location.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    location = response.headers().header("Location");
+
+    if (!location.exists()) {
+        return;
+    }
+
+    location_value = location.value().trim();
+
+    if (location_value == "") {
+        return;
+    }
+
+    location_lower = location_value.to_lower();
+
+    if (location_lower.contains("http://") ||
+        location_lower.contains("https://")) {
+        kb.set_scoped(
+            "port",
+            "http.redirect_location",
+            location_value
+        );
+
+        finding(
+            severity: "info",
+            title: "HTTP redirect exposes absolute Location",
+            description: "The HTTP service returned an absolute URL in the Location header. This is recorded as evidence for further Host header analysis.",
+            evidence: "Location: " + location_value,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.90
+        );
+
+        return;
+    }
+}

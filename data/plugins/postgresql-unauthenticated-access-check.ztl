@@ -1,0 +1,121 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("postgresql-unauthenticated-access-check");
+plugin.description("Checks PostgreSQL authentication behavior using a minimal startup handshake.");
+plugin.category("vulnerability");
+plugin.filter(service: "postgresql");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    startup =
+        "\x00\x00\x00\x2d" +
+        "\x00\x03\x00\x00" +
+        "user\x00zerotrust\x00" +
+        "database\x00postgres\x00" +
+        "\x00";
+
+    conn.send(startup);
+
+    response = conn.recv(timeout_ms: 2500);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 5) {
+        return;
+    }
+
+    message_type = response.byte_at(0);
+
+    if (message_type == 82) {
+        /*
+         * Authentication request.
+         *
+         * AuthenticationOk:
+         *   message type = 'R'
+         *   payload code = 0
+         *
+         * AuthenticationCleartextPassword:
+         *   payload code = 3
+         *
+         * AuthenticationMD5Password:
+         *   payload code = 5
+         *
+         * We do not send credentials.
+         */
+
+        auth_code = response.byte_at(8);
+
+        if (auth_code == 0) {
+            kb.set_scoped(
+                "port",
+                "postgresql.unauthenticated",
+                true
+            );
+
+            finding(
+                severity: "high",
+                title: "PostgreSQL unauthenticated access",
+                description: "PostgreSQL returned AuthenticationOk without requiring credentials.",
+                evidence: "StartupMessage was accepted and AuthenticationOk was returned.",
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Require authentication for PostgreSQL connections and restrict database access to trusted clients."
+            );
+
+            return;
+        }
+
+        kb.set_scoped(
+            "port",
+            "postgresql.unauthenticated",
+            false
+        );
+
+        finding(
+            severity: "info",
+            title: "PostgreSQL authentication required",
+            description: "PostgreSQL requested authentication during the startup handshake.",
+            evidence: "Authentication request code: " + auth_code,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+
+        return;
+    }
+
+    if (message_type == 69) {
+        /*
+         * ErrorResponse.
+         * Authentication/access was rejected during startup.
+         */
+
+        kb.set_scoped(
+            "port",
+            "postgresql.unauthenticated",
+            false
+        );
+
+        finding(
+            severity: "info",
+            title: "PostgreSQL unauthenticated access rejected",
+            description: "PostgreSQL rejected the startup request before an authenticated session was established.",
+            evidence: "Server returned ErrorResponse during startup.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.98
+        );
+
+        return;
+    }
+}

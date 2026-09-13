@@ -1,0 +1,99 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-dns-detect");
+plugin.description("Strong DNS service discovery using a valid DNS response to a deterministic query.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    query = "\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+          + "\x07example\x03com\x00"
+          + "\x00\x01\x00\x01";
+
+    conn.send(query);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 12) {
+        return;
+    }
+
+    transaction_id = response.slice(0, 2);
+
+    flags = response.slice(2, 2);
+
+    question_count = response.slice(4, 2);
+
+    if (question_count == "\x00\x00") {
+        return;
+    }
+
+    opcode_and_flags = response.byte_at(2);
+
+    response_flags = response.byte_at(3);
+
+    if ((response_flags & 0x80) == 0) {
+        return;
+    }
+
+    rcode = response_flags & 0x0f;
+
+    if (rcode > 5) {
+        return;
+    }
+
+    plugin.set_service(
+        "dns",
+        banner: "DNS response",
+        product: "DNS",
+        version: ""
+    );
+
+    kb.set_scoped(
+        "port",
+        "dns.transaction_id",
+        transaction_id
+    );
+
+    kb.set_scoped(
+        "port",
+        "dns.flags",
+        flags
+    );
+
+    kb.set_scoped(
+        "port",
+        "dns.response",
+        "true"
+    );
+
+    kb.set_scoped(
+        "port",
+        "dns.rcode",
+        rcode
+    );
+
+    finding(
+        severity: "info",
+        title: "DNS service detected",
+        description: "The target returned a valid DNS response to a deterministic DNS query.",
+        evidence: "DNS response with QR flag set and valid response code.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

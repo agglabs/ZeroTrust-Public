@@ -1,0 +1,99 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-security-headers");
+plugin.description("Checks HTTP security response headers for common hardening weaknesses.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    hsts = response.headers().header(
+        "Strict-Transport-Security"
+    );
+
+    csp = response.headers().header(
+        "Content-Security-Policy"
+    );
+
+    xfo = response.headers().header(
+        "X-Frame-Options"
+    );
+
+    xcto = response.headers().header(
+        "X-Content-Type-Options"
+    );
+
+    referrer = response.headers().header(
+        "Referrer-Policy"
+    );
+
+    permissions = response.headers().header(
+        "Permissions-Policy"
+    );
+
+    missing = "";
+
+    if (!hsts.exists()) {
+        missing = missing + "Strict-Transport-Security; ";
+    }
+
+    if (!csp.exists()) {
+        missing = missing + "Content-Security-Policy; ";
+    }
+
+    if (!xfo.exists()) {
+        missing = missing + "X-Frame-Options; ";
+    }
+
+    if (!xcto.exists()) {
+        missing = missing + "X-Content-Type-Options; ";
+    }
+
+    if (!referrer.exists()) {
+        missing = missing + "Referrer-Policy; ";
+    }
+
+    if (!permissions.exists()) {
+        missing = missing + "Permissions-Policy; ";
+    }
+
+    if (missing == "") {
+        finding(
+            severity: "info",
+            title: "HTTP security headers present",
+            description: "The HTTP response contains the checked security headers.",
+            evidence: "HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy and Permissions-Policy are present.",
+            verification: "CONFIG_MATCH",
+            confidence: 0.95
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "low",
+        title: "Missing HTTP security headers",
+        description: "The HTTP response is missing one or more recommended security headers.",
+        evidence: missing,
+        verification: "CONFIG_MATCH",
+        confidence: 0.95,
+        remediation: "Configure the web server or application to send appropriate security response headers."
+    );
+}

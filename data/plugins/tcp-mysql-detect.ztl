@@ -1,0 +1,122 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-mysql-detect");
+plugin.description("Strong MySQL service discovery using the MySQL initial handshake packet.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    response = conn.recv_banner(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 8) {
+        return;
+    }
+
+    /*
+     * MySQL packet:
+     *
+     * 3 bytes  packet length
+     * 1 byte   packet sequence
+     * 1 byte   protocol version
+     * ...
+     *
+     * Protocol version 10 is the normal MySQL handshake.
+     */
+
+    protocol_version = response.byte_at(4);
+
+    if (protocol_version != 10) {
+        return;
+    }
+
+    /*
+     * Validate that the payload contains a server version
+     * immediately after the protocol-version byte.
+     */
+
+    version_end = response.index_of("\x00");
+
+    if (version_end < 5) {
+        return;
+    }
+
+    server_version = response.slice(
+        5,
+        version_end - 5
+    );
+
+    server_version = server_version.trim();
+
+    if (server_version == "") {
+        return;
+    }
+
+    /*
+     * Reject obviously invalid version strings.
+     * A MySQL server version normally contains at least
+     * one numeric component.
+     */
+
+    if (!server_version.contains(".")) {
+        return;
+    }
+
+    product = "MySQL";
+
+    version = server_version;
+
+    version_lower = server_version.to_lower();
+
+    if (version_lower.contains("mariadb")) {
+        product = "MariaDB";
+    }
+
+    plugin.set_service(
+        "mysql",
+        banner: server_version,
+        product: product,
+        version: version
+    );
+
+    kb.set_scoped(
+        "port",
+        "mysql.protocol_version",
+        protocol_version
+    );
+
+    kb.set_scoped(
+        "port",
+        "mysql.version",
+        server_version
+    );
+
+    kb.set_scoped(
+        "port",
+        "mysql.product",
+        product
+    );
+
+    finding(
+        severity: "info",
+        title: "MySQL service detected",
+        description: "The target returned a valid MySQL initial handshake with protocol version 10.",
+        evidence: server_version,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

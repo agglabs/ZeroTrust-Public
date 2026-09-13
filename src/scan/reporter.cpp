@@ -1,6 +1,6 @@
 // reporter.cpp
 
-#include "progress/reporter.hpp"
+#include "scan/reporter.hpp"
 
 #include <iostream>
 #include <sstream>

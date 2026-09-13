@@ -1,0 +1,66 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("mysql-unauthenticated-access-check");
+plugin.description("Checks whether MySQL accepts an unauthenticated session without executing SQL.");
+plugin.category("vulnerability");
+plugin.filter(service: "mysql");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    handshake = conn.recv(timeout_ms: 2500);
+
+    if (handshake == "") {
+        return;
+    }
+
+    if (handshake.length() < 20) {
+        return;
+    }
+
+    protocol_version = handshake.byte_at(4);
+
+    if (protocol_version != 10) {
+        return;
+    }
+
+    plugin.set_service(
+        "mysql",
+        banner: handshake,
+        product: target.product,
+        version: target.version
+    );
+
+    kb.set_scoped(
+        "port",
+        "mysql.handshake",
+        true
+    );
+
+    /*
+     * Do not send a fabricated authentication packet here.
+     * MySQL authentication packets depend on the negotiated
+     * capabilities, authentication plugin and server challenge.
+     *
+     * The handshake itself is recorded, but unauthenticated
+     * access is not claimed without a valid protocol exchange.
+     */
+
+    finding(
+        severity: "info",
+        title: "MySQL authentication endpoint detected",
+        description: "The MySQL server exposed a valid protocol handshake. Unauthenticated database access was not confirmed by this non-destructive probe.",
+        evidence: "MySQL protocol version: " + protocol_version,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

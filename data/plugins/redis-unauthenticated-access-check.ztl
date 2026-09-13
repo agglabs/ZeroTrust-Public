@@ -1,0 +1,79 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("redis-unauthenticated-access-check");
+plugin.description("Checks whether a Redis service exposes informational commands without authentication.");
+plugin.category("vulnerability");
+plugin.filter(service: "redis");
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    conn.send("*1\r\n$4\r\nPING\r\n");
+
+    ping_response = conn.recv(timeout_ms: 2000);
+    ping_response = ping_response.trim();
+
+    if (ping_response != "+PONG") {
+        return;
+    }
+
+    conn.send("*1\r\n$4\r\nINFO\r\n");
+
+    info_response = conn.recv(timeout_ms: 2000);
+    info_response = info_response.trim();
+
+    if (info_response == "") {
+        return;
+    }
+
+    if (info_response.starts_with("$") ||
+        info_response.starts_with("-")) {
+        return;
+    }
+
+    if (info_response.contains("redis_version:") ||
+        info_response.contains("# Server") ||
+        info_response.contains("# Stats")) {
+        kb.set_scoped(
+            "port",
+            "redis.unauthenticated",
+            true
+        );
+
+        finding(
+            severity: "high",
+            title: "Redis unauthenticated access",
+            description: "The Redis service accepted informational commands without authentication.",
+            evidence: "PING returned +PONG and INFO returned Redis server information.",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Require authentication for Redis and restrict network access to trusted clients."
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "redis.unauthenticated",
+        false
+    );
+
+    finding(
+        severity: "info",
+        title: "Redis informational access not confirmed",
+        description: "Redis responded to PING but unauthenticated access to INFO was not confirmed.",
+        evidence: "PING returned +PONG.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.95
+    );
+}

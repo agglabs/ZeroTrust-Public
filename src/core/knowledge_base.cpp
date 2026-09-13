@@ -20,6 +20,18 @@ namespace core {
         return data.find(key) != data.end();
     }
 
+    void KnowledgeBase::set_scoped(KnowledgeScope scope, const std::string& key, const std::string& value) {
+        set(scoped_key(scope, key), value);
+    }
+
+    std::optional<std::string> KnowledgeBase::get_scoped(KnowledgeScope scope, const std::string& key) const {
+        return get(scoped_key(scope, key));
+    }
+
+    bool KnowledgeBase::has_scoped(KnowledgeScope scope, const std::string& key) const {
+        return has(scoped_key(scope, key));
+    }
+
     std::map<std::string, std::string> KnowledgeBase::snapshot() const {
         std::lock_guard<std::mutex> lock(mtx);
         return data;

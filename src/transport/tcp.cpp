@@ -124,14 +124,26 @@ namespace transport {
 
     bool Tcp::send(const std::string& data)
     {
-        ssize_t result = ::send(
-            socket_fd,
-            data.c_str(),
-            data.size(),
-            0
-        );
+        if (socket_fd == -1) return false;
 
-        return result == static_cast<ssize_t>(data.size());
+        std::size_t sent = 0;
+        while (sent < data.size()) {
+            ssize_t result = ::send(
+                socket_fd,
+                data.data() + sent,
+                data.size() - sent,
+                0
+            );
+
+            if (result > 0) {
+                sent += static_cast<std::size_t>(result);
+                continue;
+            }
+            if (result < 0 && errno == EINTR) continue;
+            return false;
+        }
+
+        return true;
     }
 
     std::string Tcp::receive(int timeout_ms)

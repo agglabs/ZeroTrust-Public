@@ -63,6 +63,20 @@ namespace ztl {
                     case '\\': out += '\\'; break;
                     case '"':  out += '"';  break;
                     case '0':  out += '\0'; break;
+                    case 'x': {
+                        auto hex = [&](char c) -> int {
+                            if (c >= '0' && c <= '9') return c - '0';
+                            if (c >= 'a' && c <= 'f') return 10 + c - 'a';
+                            if (c >= 'A' && c <= 'F') return 10 + c - 'A';
+                            return -1;
+                        };
+                        if (pos_ + 1 >= src_.size()) throw LexError("truncated \\xHH", start_line, start_col);
+                        int h = hex(advance());
+                        int l = hex(advance());
+                        if (h < 0 || l < 0) throw LexError("bad \\xHH digits", start_line, start_col);
+                        out += static_cast<char>((h << 4) | l);
+                        break;
+                    }
                     default:   out += esc;  break;
                 }
             } else {

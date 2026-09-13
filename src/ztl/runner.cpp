@@ -6,6 +6,8 @@
 #include "ztl/lexer.hpp"
 #include "ztl/parser.hpp"
 #include "transport/tcp.hpp"
+#include "transport/tls.hpp"
+#include "scan/cve.hpp"
 
 #include <cctype>
 #include <dirent.h>
@@ -30,12 +32,6 @@ namespace {
         p->name = name;
         p->fn = std::move(cb);
         return p;
-    }
-
-    Value opt_named(CallContext& ctx, const std::string& key, Value fallback = Value{std::monostate{}}) {
-        auto it = ctx.named.find(key);
-        if (it != ctx.named.end()) return it->second;
-        return fallback;
     }
 
     std::string need_string(const Value& v, const std::string& what, int line, int col) {
@@ -69,8 +65,11 @@ namespace {
         int target_port = 0;
         std::string known_service;
         std::string set_service;
+        std::string set_product;
+        std::string set_version;
         bool meta_only = false;
         ztl::KbSharedPtr kb;
+        std::shared_ptr<Object> target;
     };
 
     // ---------- Header / Response objects ----------
@@ -257,6 +256,61 @@ namespace {
         return o;
     }
 
+    std::string tls_result_name(transport::TlsHandshakeResult result) {
+        switch (result) {
+            case transport::TlsHandshakeResult::OK:              return "OK";
+            case transport::TlsHandshakeResult::REFUSED:         return "REFUSED";
+            case transport::TlsHandshakeResult::TIMEOUT:         return "TIMEOUT";
+            case transport::TlsHandshakeResult::NOT_TLS:         return "NOT_TLS";
+            case transport::TlsHandshakeResult::HANDSHAKE_FAILED:return "HANDSHAKE_FAILED";
+            case transport::TlsHandshakeResult::UNKNOWN:         return "UNKNOWN";
+        }
+        return "UNKNOWN";
+    }
+
+    std::shared_ptr<Object> make_tls_report_obj(const transport::TlsHandshakeReport& report) {
+        auto o = std::make_shared<Object>();
+        o->type_name = "TlsReport";
+        o->fields["ok"] = Value{report.result == transport::TlsHandshakeResult::OK};
+        o->fields["result"] = Value{tls_result_name(report.result)};
+        o->fields["protocol_version"] = Value{report.protocol_version};
+        o->fields["cipher"] = Value{report.cipher_name};
+        o->fields["certificate_present"] = Value{report.certificate_present};
+        o->fields["subject"] = Value{report.certificate.subject};
+        o->fields["issuer"] = Value{report.certificate.issuer};
+        o->fields["not_before"] = Value{report.certificate.not_before};
+        o->fields["not_after"] = Value{report.certificate.not_after};
+        o->fields["signature_algorithm"] = Value{report.certificate.signature_algorithm};
+        o->fields["self_signed"] = Value{report.certificate.self_signed};
+        o->fields["expired"] = Value{report.certificate.expired};
+        o->fields["days_until_expiry"] = Value{static_cast<double>(report.certificate.days_until_expiry)};
+        return o;
+    }
+
+    struct TlsState {
+        std::string host;
+        int port = 0;
+        int timeout_ms = 3000;
+    };
+
+    std::shared_ptr<Object> make_tls_obj(const std::string& host, int port, int timeout_ms) {
+        auto state = std::make_shared<TlsState>();
+        state->host = host;
+        state->port = port;
+        state->timeout_ms = timeout_ms;
+
+        auto o = std::make_shared<Object>();
+        o->type_name = "Tls";
+        o->native_state = state;
+        o->fields["host"] = Value{host};
+        o->fields["port"] = Value{static_cast<double>(port)};
+        o->methods["handshake"] = nfn("Tls.handshake", [state](CallContext&) -> Value {
+            transport::Tls tls;
+            return Value{make_tls_report_obj(tls.handshake(state->host, state->port, state->timeout_ms))};
+        });
+        return o;
+    }
+
     // ---------- Plugin object ----------
 
     std::shared_ptr<Object> make_plugin_obj(std::shared_ptr<RunState> state) {
@@ -286,14 +340,23 @@ namespace {
             if (c.positional.empty()) throw RuntimeError("set_service(name) requires 1 argument", c.line, c.col);
             std::string svc = need_string(c.positional[0], "service name", c.line, c.col);
             state->set_service = svc;
+
+            auto vit = c.named.find("version");
+            if (vit != c.named.end()) state->set_version = need_string(vit->second, "version", c.line, c.col);
+            auto pit = c.named.find("product");
+            if (pit != c.named.end()) state->set_product = need_string(pit->second, "product", c.line, c.col);
+
             if (state->kb) {
                 state->kb->data["service"] = Value{svc};
-                auto vit = c.named.find("version");
                 if (vit != c.named.end()) state->kb->data["version"] = vit->second;
-                auto pit = c.named.find("product");
                 if (pit != c.named.end()) state->kb->data["product"] = pit->second;
                 auto bit = c.named.find("banner");
                 if (bit != c.named.end()) state->kb->data["banner"] = bit->second;
+            }
+            if (state->target) {
+                state->target->fields["service"] = Value{svc};
+                if (vit != c.named.end()) state->target->fields["version"] = vit->second;
+                if (pit != c.named.end()) state->target->fields["product"] = pit->second;
             }
             return Value{std::monostate{}};
         });
@@ -344,6 +407,11 @@ namespace {
             if (auto v = get("severity"))    f.severity    = need_string(*v, "severity", c.line, c.col);
             if (auto v = get("title"))       f.title       = need_string(*v, "title", c.line, c.col);
             if (auto v = get("description")) f.description = need_string(*v, "description", c.line, c.col);
+            if (auto v = get("cve"))         f.cve_id      = need_string(*v, "cve", c.line, c.col);
+            if (auto v = get("verification")) {
+                std::string status = need_string(*v, "verification", c.line, c.col);
+                f.verification = core::to_string(core::verification_status_from_string(status));
+            }
             if (auto v = get("evidence")) {
                 if (auto s = as_string(*v)) f.evidence = *s;
                 else f.evidence = value_to_string(*v);
@@ -351,6 +419,19 @@ namespace {
             if (auto v = get("confidence")) {
                 if (auto n = as_number(*v)) f.confidence = *n;
             }
+            if (auto v = get("remediation")) f.remediation = need_string(*v, "remediation", c.line, c.col);
+            if (auto v = get("cvss_vector")) f.cvss_vector = need_string(*v, "cvss_vector", c.line, c.col);
+            if (auto v = get("cvss")) {
+                if (auto n = as_number(*v)) f.cvss = *n;
+            }
+            f.confidence_score = f.confidence;
+            f.timestamp = core::current_timestamp();
+            f.evidence_data = {"plugin", f.plugin_name, f.evidence, f.description};
+            f.host = state->target_host;
+            f.protocol = core::Protocol::TCP;
+            f.scope = "PORT";
+            f.product = state->set_product;
+            f.version = state->set_version;
             if (f.severity.empty()) f.severity = "info";
             state->findings.push_back(std::move(f));
             return Value{std::monostate{}};
@@ -382,14 +463,106 @@ namespace {
             if (!state->kb) return Value{false};
             return Value{state->kb->data.count(key) > 0};
         });
+        o->methods["set_scoped"] = nfn("Kb.set_scoped", [state](CallContext& c) -> Value {
+            if (c.positional.size() < 3) throw RuntimeError("kb.set_scoped(scope, key, value) requires 3 args", c.line, c.col);
+            std::string scope = need_string(c.positional[0], "scope", c.line, c.col);
+            std::string key = need_string(c.positional[1], "key", c.line, c.col);
+            if (scope != "host" && scope != "port") throw RuntimeError("scope must be host or port", c.line, c.col);
+            if (state->kb) state->kb->data[scope + "." + key] = c.positional[2];
+            return Value{std::monostate{}};
+        });
+        o->methods["get_scoped"] = nfn("Kb.get_scoped", [state](CallContext& c) -> Value {
+            if (c.positional.size() < 2) throw RuntimeError("kb.get_scoped(scope, key) requires 2 args", c.line, c.col);
+            std::string scope = need_string(c.positional[0], "scope", c.line, c.col);
+            std::string key = need_string(c.positional[1], "key", c.line, c.col);
+            if (scope != "host" && scope != "port") throw RuntimeError("scope must be host or port", c.line, c.col);
+            if (!state->kb) return Value{std::monostate{}};
+            auto it = state->kb->data.find(scope + "." + key);
+            return it == state->kb->data.end() ? Value{std::monostate{}} : it->second;
+        });
+        o->methods["has_scoped"] = nfn("Kb.has_scoped", [state](CallContext& c) -> Value {
+            if (c.positional.size() < 2) throw RuntimeError("kb.has_scoped(scope, key) requires 2 args", c.line, c.col);
+            std::string scope = need_string(c.positional[0], "scope", c.line, c.col);
+            std::string key = need_string(c.positional[1], "key", c.line, c.col);
+            if (scope != "host" && scope != "port") throw RuntimeError("scope must be host or port", c.line, c.col);
+            return Value{state->kb && state->kb->data.count(scope + "." + key) > 0};
+        });
+        return o;
+    }
+
+    std::shared_ptr<Object> make_cve_result(const vuln::VerificationResult& verification) {
+        auto result = std::make_shared<Object>();
+        result->type_name = "CveResult";
+        result->fields["vulnerable"] = Value{verification.vulnerable};
+        result->fields["cve"] = Value{verification.cve};
+        result->fields["severity"] = Value{verification.severity};
+        result->fields["title"] = Value{verification.title};
+        result->fields["description"] = Value{verification.description};
+        result->fields["evidence"] = Value{verification.evidence};
+        result->fields["cvss"] = Value{verification.cvss};
+        result->fields["cvss_vector"] = Value{verification.cvss_vector};
+        result->fields["remediation"] = Value{verification.remediation};
+        result->fields["verification"] = Value{verification.verification};
+        result->fields["confidence"] = Value{verification.confidence};
+        return result;
+    }
+
+    std::shared_ptr<Object> make_cve_obj() {
+        auto o = std::make_shared<Object>();
+        o->type_name = "Cve";
+        o->methods["check"] = nfn("cve.check", [](CallContext& c) -> Value {
+            std::string id, product, version;
+            auto it = c.named.find("id");
+            if (it != c.named.end()) id = need_string(it->second, "cve id", c.line, c.col);
+            it = c.named.find("product");
+            if (it != c.named.end()) product = need_string(it->second, "product", c.line, c.col);
+            it = c.named.find("version");
+            if (it != c.named.end()) version = need_string(it->second, "version", c.line, c.col);
+            return Value{make_cve_result(vuln::verify_version(id, product, version))};
+        });
+        o->methods["verify"] = nfn("cve.verify", [](CallContext& c) -> Value {
+            auto it = c.named.find("target");
+            if (it == c.named.end()) throw RuntimeError("cve.verify requires target:", c.line, c.col);
+            auto target = as_object(it->second);
+            if (!target || target->type_name != "Target") {
+                throw RuntimeError("cve.verify target must be a target object", c.line, c.col);
+            }
+
+            std::string id;
+            it = c.named.find("id");
+            if (it != c.named.end()) id = need_string(it->second, "cve id", c.line, c.col);
+            auto field = [&](const std::string& name) {
+                auto fit = target->fields.find(name);
+                return fit == target->fields.end() ? std::string{} : need_string(fit->second, name, c.line, c.col);
+            };
+            return Value{make_cve_result(vuln::verify_version(id, field("product"), field("version")))};
+        });
         return o;
     }
 
     void register_stdlib(Interpreter& interp, std::shared_ptr<RunState> state) {
         interp.define_global("plugin", Value{make_plugin_obj(state)});
-        interp.define_global("target", Value{make_target_obj(state->target_host, state->target_port, state->known_service)});
+        state->target = make_target_obj(state->target_host, state->target_port, state->known_service);
+        state->target->fields["product"] = Value{""};
+        state->target->fields["version"] = Value{""};
+        if (state->kb) {
+            auto product = state->kb->data.find("product");
+            auto version = state->kb->data.find("version");
+            if (product != state->kb->data.end()) state->target->fields["product"] = product->second;
+            if (version != state->kb->data.end()) state->target->fields["version"] = version->second;
+        }
+        interp.define_global("target", Value{state->target});
         interp.define_global("finding", Value{make_finding_fn(state)});
         interp.define_global("kb", Value{make_kb_obj(state)});
+        interp.define_global("cve", Value{make_cve_obj()});
+        interp.define_global("cve_lookup", Value{nfn("cve_lookup", [](CallContext& c) -> Value {
+            std::string product, version;
+            auto it = c.named.find("product"); if (it != c.named.end()) product = need_string(it->second, "product", c.line, c.col);
+            it       = c.named.find("version"); if (it != c.named.end()) version = need_string(it->second, "version", c.line, c.col);
+            if (product.empty() && c.positional.size() >= 1) product = need_string(c.positional[0], "product", c.line, c.col);
+            if (version.empty() && c.positional.size() >= 2) version = need_string(c.positional[1], "version", c.line, c.col);
+            return Value{vuln::lookup(product, version)};
+        })});
 
         interp.define_global("net::tcp", Value{nfn("net::tcp", [](CallContext& c) -> Value {
             std::string host;
@@ -411,6 +584,17 @@ namespace {
             it       = c.named.find("timeout_ms"); if (it != c.named.end()) timeout = need_int(it->second, "timeout_ms", c.line, c.col);
             if (host.empty()) throw RuntimeError("net::http requires host:", c.line, c.col);
             return Value{make_http_obj(host, port, timeout)};
+        })});
+
+        interp.define_global("net::tls", Value{nfn("net::tls", [](CallContext& c) -> Value {
+            std::string host;
+            int port = 443;
+            int timeout = 3000;
+            auto it = c.named.find("host"); if (it != c.named.end()) host = need_string(it->second, "host", c.line, c.col);
+            it = c.named.find("port"); if (it != c.named.end()) port = need_int(it->second, "port", c.line, c.col);
+            it = c.named.find("timeout_ms"); if (it != c.named.end()) timeout = need_int(it->second, "timeout_ms", c.line, c.col);
+            if (host.empty()) throw RuntimeError("net::tls requires host:", c.line, c.col);
+            return Value{make_tls_obj(host, port, timeout)};
         })});
     }
 }
@@ -495,6 +679,8 @@ namespace ztl {
         out.meta = state->meta;
         out.findings = std::move(state->findings);
         out.detected_service = state->set_service;
+        out.detected_product = state->set_product;
+        out.detected_version = state->set_version;
         out.detected_port = state->set_service.empty() ? 0 : target_port;
         return out;
     }
@@ -502,24 +688,31 @@ namespace ztl {
     std::vector<FindingOut> run_for_port(const std::vector<LoadedPlugin>& plugins,
                                          const std::string& host, int port,
                                          const std::string& initial_service,
-                                         std::string& out_service) {
+                                         DetectedInfo& out_info) {
         auto kb = make_kb();
         if (!initial_service.empty()) kb->data["service"] = Value{initial_service};
         std::string svc = initial_service;
+        std::string product, version;
         std::vector<FindingOut> out;
+
+        auto absorb = [&](const RunOutcome& r) {
+            for (auto& f : r.findings) out.push_back(f);
+            if (!r.detected_service.empty()) svc = r.detected_service;
+            if (!r.detected_product.empty()) product = r.detected_product;
+            if (!r.detected_version.empty()) version = r.detected_version;
+        };
         for (const auto& lp : plugins) {
             if (!lp.preview_meta.filter_any) continue;
-            RunOutcome r = run_plugin(lp, host, port, svc, kb);
-            if (!r.detected_service.empty()) svc = r.detected_service;
-            for (auto& f : r.findings) out.push_back(std::move(f));
+            absorb(run_plugin(lp, host, port, svc, kb));
         }
         for (const auto& lp : plugins) {
             if (lp.preview_meta.filter_any) continue;
             if (!lp.preview_meta.filter_service.empty() && lp.preview_meta.filter_service != svc) continue;
-            RunOutcome r = run_plugin(lp, host, port, svc, kb);
-            for (auto& f : r.findings) out.push_back(std::move(f));
+            absorb(run_plugin(lp, host, port, svc, kb));
         }
-        out_service = svc;
+        out_info.service = svc;
+        out_info.product = product;
+        out_info.version = version;
         return out;
     }
 

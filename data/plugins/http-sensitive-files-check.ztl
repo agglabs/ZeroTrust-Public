@@ -1,0 +1,142 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-sensitive-files-check");
+plugin.description("Checks for common accidentally exposed sensitive files and directories over HTTP.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "GET",
+        path: "/.git/HEAD"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+
+        if (body.starts_with("ref: refs/") ||
+            body.starts_with("ref:")) {
+            finding(
+                severity: "high",
+                title: "Git repository metadata exposed",
+                description: "The HTTP server exposes the .git repository metadata endpoint.",
+                evidence: "GET /.git/HEAD returned HTTP " + status + ": " + body,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Remove the .git directory from the web root or deny HTTP access to repository metadata."
+            );
+
+            kb.set_scoped(
+                "port",
+                "http.exposed_git",
+                true
+            );
+
+            return;
+        }
+    }
+
+    response = conn.request(
+        method: "GET",
+        path: "/.env"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+
+        if (body.contains("APP_KEY=") ||
+            body.contains("DB_PASSWORD=") ||
+            body.contains("DATABASE_URL=") ||
+            body.contains("SECRET_KEY=")) {
+            finding(
+                severity: "critical",
+                title: "Environment configuration exposed",
+                description: "The HTTP server appears to expose an environment configuration file containing sensitive configuration data.",
+                evidence: "GET /.env returned HTTP " + status,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Remove the .env file from the web root and prevent direct HTTP access to environment configuration files."
+            );
+
+            kb.set_scoped(
+                "port",
+                "http.exposed_env",
+                true
+            );
+
+            return;
+        }
+    }
+
+    response = conn.request(
+        method: "GET",
+        path: "/phpinfo.php"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+        body_lower = body.to_lower();
+
+        if (body_lower.contains("php version") ||
+            body_lower.contains("phpinfo()") ||
+            body_lower.contains("phpinfo")) {
+            finding(
+                severity: "medium",
+                title: "PHP information page exposed",
+                description: "A publicly accessible PHP information page was detected.",
+                evidence: "GET /phpinfo.php returned HTTP " + status,
+                verification: "ACTIVE_CHECK",
+                confidence: 0.99,
+                remediation: "Remove or restrict access to phpinfo.php in production environments."
+            );
+
+            kb.set_scoped(
+                "port",
+                "http.exposed_phpinfo",
+                true
+            );
+
+            return;
+        }
+    }
+
+    response = conn.request(
+        method: "GET",
+        path: "/backup.zip"
+    );
+
+    status = response.status();
+
+    if (status >= 200 && status < 300) {
+        finding(
+            severity: "medium",
+            title: "Potential backup file exposed",
+            description: "A commonly used backup archive path is publicly accessible.",
+            evidence: "GET /backup.zip returned HTTP " + status,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.90,
+            remediation: "Remove backup archives from the web root and prevent public HTTP access to backup files."
+        );
+
+        kb.set_scoped(
+            "port",
+            "http.exposed_backup",
+            true
+        );
+
+        return;
+    }
+}

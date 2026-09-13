@@ -1,0 +1,51 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("http-trace-check");
+plugin.description("Checks whether the HTTP server accepts the TRACE method.");
+plugin.category("vulnerability");
+plugin.filter(service: "http");
+
+plugin.run {
+    conn = net::http(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    response = conn.request(
+        method: "TRACE",
+        path: "/"
+    );
+
+    status = response.status();
+
+    if (status < 100 || status > 599) {
+        return;
+    }
+
+    if (status >= 200 && status < 300) {
+        body = response.body();
+
+        finding(
+            severity: "medium",
+            title: "HTTP TRACE method enabled",
+            description: "The HTTP server accepted a TRACE request. TRACE should normally be disabled because it can expose request headers and contribute to Cross-Site Tracing risks in affected deployments.",
+            evidence: "TRACE / returned HTTP status " + status,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Disable the TRACE method on the web server unless it is explicitly required."
+        );
+
+        return;
+    }
+
+    finding(
+        severity: "info",
+        title: "HTTP TRACE method disabled",
+        description: "The HTTP server did not accept the TRACE request as a successful 2xx request.",
+        evidence: "TRACE / returned HTTP status " + status,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.98
+    );
+}

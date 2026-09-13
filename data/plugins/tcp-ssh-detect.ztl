@@ -1,0 +1,156 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-ssh-detect");
+plugin.description("Strong SSH service discovery using the protocol identification banner.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2000
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    banner = conn.recv_banner(timeout_ms: 2000);
+    banner = banner.trim();
+
+    if (banner == "") {
+        return;
+    }
+
+    /*
+     * SSH identification strings have the form:
+     *
+     * SSH-protoversion-softwareversion
+     *
+     * We intentionally require the complete "SSH-" prefix instead
+     * of treating arbitrary TCP data as an SSH service.
+     */
+    if (!banner.starts_with("SSH-")) {
+        return;
+    }
+
+    if (banner.length() < 9) {
+        return;
+    }
+
+    /*
+     * The protocol version starts immediately after "SSH-".
+     * Accept only the standard SSH 2.0 identification or the
+     * historical 1.99 compatibility identifier.
+     */
+    protocol = banner.slice(4, 3);
+
+    if (protocol != "2.0" && protocol != "1.99") {
+        return;
+    }
+
+    /*
+     * The software identification starts after:
+     *
+     * SSH-2.0-
+     *    ^ position 8
+     *
+     * Require an actual software field.
+     */
+    software = banner.slice(8, banner.length() - 8);
+    software = software.trim();
+
+    if (software == "") {
+        return;
+    }
+
+    product = "";
+    version = "";
+
+    /*
+     * Common SSH server fingerprints.
+     *
+     * We do not claim a product merely because a string is present
+     * somewhere in arbitrary TCP data — the SSH protocol banner has
+     * already been validated above.
+     */
+    if (software.starts_with("OpenSSH_")) {
+        product = "OpenSSH";
+
+        separator = software.index_of("_");
+        if (separator >= 0) {
+            version_part = software.slice(
+                separator + 1,
+                software.length() - separator - 1
+            );
+
+            separator = version_part.index_of(" ");
+            if (separator >= 0) {
+                version = version_part.slice(0, separator);
+            } else {
+                version = version_part;
+            }
+
+            separator = version.index_of("p");
+            if (separator > 0) {
+                version = version.slice(0, separator);
+            }
+        }
+    } else if (software.starts_with("dropbear_")) {
+        product = "Dropbear";
+
+        separator = software.index_of("_");
+        if (separator >= 0) {
+            version = software.slice(
+                separator + 1,
+                software.length() - separator - 1
+            );
+        }
+    } else if (software.starts_with("libssh")) {
+        product = "libssh";
+    } else if (software.starts_with("PuTTY")) {
+        product = "PuTTY";
+    } else {
+        /*
+         * Unknown SSH implementation.
+         *
+         * It is still a valid SSH service, but we do not invent
+         * a product name.
+         */
+        product = "SSH";
+    }
+
+    /*
+     * Commit the service only after the SSH protocol fingerprint
+     * has passed all checks.
+     */
+    plugin.set_service(
+        "ssh",
+        banner: banner,
+        product: product,
+        version: version
+    );
+
+    kb.set_scoped("port", "ssh.protocol", protocol);
+    kb.set_scoped("port", "ssh.banner", banner);
+    kb.set_scoped("port", "ssh.software", software);
+
+    if (product != "") {
+        kb.set_scoped("port", "ssh.product", product);
+    }
+
+    if (version != "") {
+        kb.set_scoped("port", "ssh.version", version);
+    }
+
+    finding(
+        severity: "info",
+        title: "SSH service detected",
+        description: "The target is running an SSH service on the scanned TCP port.",
+        evidence: banner,
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

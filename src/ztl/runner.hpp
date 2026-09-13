@@ -3,7 +3,9 @@
 #pragma once
 
 #include "ztl/ast.hpp"
+#include "finding.h"
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -14,6 +16,20 @@ namespace ztl {
         std::string title;
         std::string description;
         std::string evidence;
+        core::Evidence evidence_data;
+        std::vector<std::string> references;
+        std::string remediation;
+        std::string cvss_vector;
+        double cvss = -1.0;
+        std::string cve_id;
+        std::string verification = "UNKNOWN";
+        double confidence_score = 0.0;
+        std::string host;
+        core::Protocol protocol = core::Protocol::UNKNOWN;
+        std::string scope = "PORT";
+        std::string product;
+        std::string version;
+        std::int64_t timestamp = 0;
         std::string service;
         double confidence = 0.0;
         std::uint16_t port_number = 0;
@@ -37,6 +53,8 @@ namespace ztl {
         PluginMeta meta;
         std::vector<FindingOut> findings;
         std::string detected_service;
+        std::string detected_product;
+        std::string detected_version;
         int detected_port = 0;
     };
 
@@ -66,9 +84,16 @@ namespace ztl {
                                     const std::string& host,
                                     const std::vector<int>& open_ports);
 
-    // Two-pass run on a single (host, port). Returns detected service too.
+    // Enriched service info discovered by plugins on a single port.
+    struct DetectedInfo {
+        std::string service;
+        std::string product;
+        std::string version;
+    };
+
+    // Two-pass run on a single (host, port). Returns detected service info.
     std::vector<FindingOut> run_for_port(const std::vector<LoadedPlugin>& plugins,
                                          const std::string& host, int port,
                                          const std::string& initial_service,
-                                         std::string& out_service);
+                                         DetectedInfo& out_info);
 }

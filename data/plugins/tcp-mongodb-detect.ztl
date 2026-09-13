@@ -1,0 +1,107 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tcp-mongodb-detect");
+plugin.description("Strong MongoDB service discovery using a deterministic OP_MSG hello request.");
+plugin.category("discovery");
+plugin.filter(any: true);
+
+plugin.run {
+    conn = net::tcp(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 2500
+    );
+
+    if (!conn.connected()) {
+        return;
+    }
+
+    /*
+     * MongoDB OP_MSG request.
+     *
+     * Message:
+     *   int32 messageLength
+     *   int32 requestId
+     *   int32 responseTo
+     *   int32 opCode = 2013
+     *   int32 flagBits = 0
+     *   section kind = 0
+     *   BSON document:
+     *     { "hello": 1, "$db": "admin" }
+     *
+     * The payload below is a minimal BSON hello command.
+     */
+
+    request = "\x2b\x00\x00\x00"
+            + "\x01\x00\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\xdd\x07\x00\x00"
+            + "\x00\x00\x00\x00"
+            + "\x00"
+            + "\x1b\x00\x00\x00"
+            + "\x10hello\x00\x01\x00\x00\x00"
+            + "\x02$db\x00\x06\x00\x00\x00admin\x00"
+            + "\x00";
+
+    conn.send(request);
+
+    response = conn.recv(timeout_ms: 2000);
+
+    if (response == "") {
+        return;
+    }
+
+    if (response.length() < 16) {
+        return;
+    }
+
+    /*
+     * MongoDB response must contain a valid 16-byte
+     * message header.
+     */
+
+    opcode = response.byte_at(12);
+
+    if (opcode != 2013) {
+        return;
+    }
+
+    /*
+     * Look for MongoDB hello/isMaster response fields.
+     */
+
+    if (!response.contains("isWritablePrimary") &&
+        !response.contains("ismaster") &&
+        !response.contains("helloOk")) {
+        return;
+    }
+
+    plugin.set_service(
+        "mongodb",
+        banner: "MongoDB wire protocol",
+        product: "MongoDB",
+        version: ""
+    );
+
+    kb.set_scoped(
+        "port",
+        "mongodb.protocol",
+        "OP_MSG"
+    );
+
+    kb.set_scoped(
+        "port",
+        "mongodb.product",
+        "MongoDB"
+    );
+
+    finding(
+        severity: "info",
+        title: "MongoDB service detected",
+        description: "The target returned a valid MongoDB OP_MSG response to a deterministic hello request.",
+        evidence: "MongoDB OP_MSG hello response detected.",
+        verification: "ACTIVE_CHECK",
+        confidence: 0.99
+    );
+}

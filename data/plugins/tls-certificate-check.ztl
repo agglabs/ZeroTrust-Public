@@ -1,0 +1,121 @@
+include("@zerotrust/plugin");
+include("@zerotrust/net");
+
+plugin.name("tls-certificate-check");
+plugin.description("Checks TLS certificate validity, expiration and self-signed status.");
+plugin.category("vulnerability");
+plugin.filter(service: "https");
+
+plugin.run {
+    tls = net::tls(
+        host: target.host,
+        port: target.port,
+        timeout_ms: 3000
+    );
+
+    report = tls.handshake();
+
+    if (!report.ok) {
+        return;
+    }
+
+    if (report.result != "OK") {
+        return;
+    }
+
+    if (!report.certificate_present) {
+        finding(
+            severity: "high",
+            title: "TLS certificate missing",
+            description: "The TLS service completed a handshake but did not provide a server certificate.",
+            evidence: "certificate_present=false",
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Configure the TLS service with a valid server certificate."
+        );
+
+        return;
+    }
+
+    kb.set_scoped(
+        "port",
+        "tls.subject",
+        report.subject
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.issuer",
+        report.issuer
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.expired",
+        report.expired
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.self_signed",
+        report.self_signed
+    );
+
+    kb.set_scoped(
+        "port",
+        "tls.days_until_expiry",
+        report.days_until_expiry
+    );
+
+    if (report.expired) {
+        finding(
+            severity: "high",
+            title: "Expired TLS certificate",
+            description: "The server certificate is expired.",
+            evidence: "Subject: " + report.subject + "; Issuer: " + report.issuer,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Replace the expired TLS certificate with a currently valid certificate."
+        );
+
+        return;
+    }
+
+    if (report.self_signed) {
+        finding(
+            severity: "medium",
+            title: "Self-signed TLS certificate",
+            description: "The TLS service presents a certificate that is self-signed.",
+            evidence: "Subject: " + report.subject + "; Issuer: " + report.issuer,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Use a certificate issued by a trusted certificate authority unless a self-signed certificate is explicitly required."
+        );
+    }
+
+    if (report.days_until_expiry >= 0 &&
+        report.days_until_expiry <= 30) {
+        finding(
+            severity: "low",
+            title: "TLS certificate expires soon",
+            description: "The server certificate will expire within 30 days.",
+            evidence: "Subject: " + report.subject + "; days_until_expiry=" + report.days_until_expiry,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99,
+            remediation: "Renew the TLS certificate before it expires."
+        );
+    }
+
+    if (!report.self_signed &&
+        !report.expired &&
+        report.days_until_expiry > 30) {
+        finding(
+            severity: "info",
+            title: "TLS certificate valid",
+            description: "The TLS server certificate is currently valid and is not self-signed.",
+            evidence: "Subject: " + report.subject + "; Issuer: " + report.issuer,
+            verification: "ACTIVE_CHECK",
+            confidence: 0.99
+        );
+    }
+}
